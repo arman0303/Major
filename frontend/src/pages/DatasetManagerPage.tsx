@@ -5,17 +5,19 @@ import { api } from '../services/api';
 import { Dataset } from '../types';
 
 export const DatasetManagerPage: React.FC = () => {
-  const { activeProject } = useAuth();
+  const { activeProject, projects, setActiveProject } = useAuth();
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [customTableName, setCustomTableName] = useState<string>('');
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
+  const currentProj = activeProject || (projects && projects[0]) || null;
+
   const fetchDatasets = async () => {
-    if (!activeProject) return;
+    if (!currentProj) return;
     try {
-      const res = await api.listDatasets(activeProject.id);
+      const res = await api.listDatasets(currentProj.id);
       setDatasets(res.datasets);
     } catch (err) {
       console.error(err);
@@ -23,26 +25,40 @@ export const DatasetManagerPage: React.FC = () => {
   };
 
   useEffect(() => {
+    if (!activeProject && projects && projects.length > 0) {
+      setActiveProject(projects[0]);
+    }
     fetchDatasets();
-  }, [activeProject]);
+  }, [activeProject, projects]);
 
   const handleUpload = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedFile || !activeProject) return;
+    const targetProj = currentProj;
+    if (!selectedFile) {
+      setStatusMessage({ type: 'error', text: 'Please select a file to upload.' });
+      return;
+    }
+    if (!targetProj) {
+      setStatusMessage({ type: 'error', text: 'No active project found. Please create or select a project first.' });
+      return;
+    }
 
     setIsUploading(true);
     setStatusMessage(null);
 
     const formData = new FormData();
     formData.append('file', selectedFile);
-    formData.append('projectId', activeProject.id);
+    formData.append('projectId', targetProj.id);
     if (customTableName) {
       formData.append('tableName', customTableName);
     }
 
     try {
-      await api.uploadDataset(formData);
-      setStatusMessage({ type: 'success', text: `Dataset '${selectedFile.name}' processed and loaded successfully!` });
+      const res = await api.uploadDataset(formData);
+      setStatusMessage({ 
+        type: 'success', 
+        text: `Successfully uploaded '${selectedFile.name}'! Ingested into table '${res.dataset.table_name}' with ${res.dataset.row_count} records.` 
+      });
       setSelectedFile(null);
       setCustomTableName('');
       await fetchDatasets();
@@ -89,7 +105,7 @@ export const DatasetManagerPage: React.FC = () => {
         <form onSubmit={handleUpload} className="space-y-4 max-w-md mx-auto pt-2">
           <input
             type="file"
-            accept=".csv,.json,.pdf"
+            accept=".csv,.json,.pdf,.txt"
             onChange={e => setSelectedFile(e.target.files?.[0] || null)}
             className="w-full text-xs text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90 cursor-pointer"
           />

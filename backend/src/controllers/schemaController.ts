@@ -113,6 +113,23 @@ export const getSchema = async (req: AuthenticatedRequest, res: Response): Promi
     );
   }
 
+  // Include all user-uploaded datasets for this project in the schema
+  if (projectId) {
+    try {
+      const dsRes = await DatabaseManager.query('SELECT table_name, schema_info FROM datasets WHERE project_id = $1', [projectId]);
+      for (const ds of dsRes.rows) {
+        if (ds.table_name && !tablesMeta[ds.table_name]) {
+          try {
+            const cols = typeof ds.schema_info === 'string' ? JSON.parse(ds.schema_info) : ds.schema_info;
+            if (Array.isArray(cols) && cols.length > 0) {
+              tablesMeta[ds.table_name] = cols;
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
   res.json({
     tables: tablesMeta,
     table_names: Object.keys(tablesMeta),

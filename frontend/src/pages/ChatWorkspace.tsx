@@ -50,7 +50,7 @@ function useCopyToClipboard() {
 }
 
 export const ChatWorkspace: React.FC = () => {
-  const { activeProject } = useAuth();
+  const { activeProject, projects, setActiveProject } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const activeConvIdFromUrl = searchParams.get('c');
 
@@ -150,21 +150,49 @@ export const ChatWorkspace: React.FC = () => {
   // Direct File Upload in Chat
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !activeProject) return;
+    if (!file) return;
+
+    let targetProject = activeProject;
+    if (!targetProject && projects && projects.length > 0) {
+      targetProject = projects[0];
+      setActiveProject(targetProject);
+    }
+
+    if (!targetProject) {
+      alert('Please select or create a project before uploading files.');
+      return;
+    }
 
     setIsUploading(true);
+
+    // If no active conversation, create one
+    let targetConv = activeConv;
+    if (!targetConv) {
+      try {
+        const newConvRes = await api.createConversation(targetProject.id, `Analysis: ${file.name}`);
+        targetConv = newConvRes.conversation;
+        setActiveConv(targetConv);
+        setSearchParams({ c: targetConv.id });
+        window.dispatchEvent(new CustomEvent('chat-updated'));
+      } catch (e) {
+        console.warn('Could not auto-create conversation for upload:', e);
+      }
+    }
+
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('projectId', activeProject.id);
+    formData.append('projectId', targetProject.id);
 
     try {
       const res = await api.uploadDataset(formData);
-      // Add a system-like message indicating file is uploaded and indexed
+      const isDoc = file.name.endsWith('.pdf') || file.name.endsWith('.txt');
       const uploadNotice: Message = {
         id: `upload_${Date.now()}`,
-        conversation_id: activeConv?.id || '',
+        conversation_id: targetConv?.id || '',
         role: 'assistant',
-        content: `📁 **Dataset Uploaded**: "${file.name}" has been uploaded and profiled (${res.dataset.row_count} records). You can now ask questions or run queries on this dataset!`,
+        content: isDoc
+          ? `📄 **Document Indexed**: "${file.name}" has been processed and added to semantic memory. You can now ask questions, request summaries, or extract key points from this document!`
+          : `📁 **Dataset Imported**: "${file.name}" has been loaded into table \`${res.dataset.table_name}\` (${res.dataset.row_count} records). You can now ask analytical questions, filter records, or generate visual charts!`,
         created_at: new Date().toISOString(),
       };
       setMessages(prev => [...prev, uploadNotice]);
@@ -180,7 +208,32 @@ export const ChatWorkspace: React.FC = () => {
   // Send Message with Simulated Typing / Token Stream
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputPrompt).trim();
-    if (!text || !activeConv || !activeProject || isLoading) return;
+    if (!text || isLoading) return;
+
+    let targetProject = activeProject;
+    if (!targetProject && projects && projects.length > 0) {
+      targetProject = projects[0];
+      setActiveProject(targetProject);
+    }
+    if (!targetProject) {
+      alert('Please select or create a project before sending messages.');
+      return;
+    }
+
+    let targetConv = activeConv;
+    if (!targetConv) {
+      try {
+        const title = text.slice(0, 30) + (text.length > 30 ? '...' : '');
+        const newConvRes = await api.createConversation(targetProject.id, title);
+        targetConv = newConvRes.conversation;
+        setActiveConv(targetConv);
+        setSearchParams({ c: targetConv.id });
+        window.dispatchEvent(new CustomEvent('chat-updated'));
+      } catch (err: any) {
+        console.error('Failed to auto-create conversation:', err);
+        return;
+      }
+    }
 
     setInputPrompt('');
     setIsLoading(true);
@@ -188,7 +241,7 @@ export const ChatWorkspace: React.FC = () => {
     const tempUserId = `usr_${Date.now()}`;
     const userMsg: Message = {
       id: tempUserId,
-      conversation_id: activeConv.id,
+      conversation_id: targetConv.id,
       role: 'user',
       content: text,
       created_at: new Date().toISOString(),
@@ -197,8 +250,8 @@ export const ChatWorkspace: React.FC = () => {
 
     try {
       const res: ChatResponse = await api.chat({
-        conversationId: activeConv.id,
-        projectId: activeProject.id,
+        conversationId: targetConv.id,
+        projectId: targetProject.id,
         message: text,
       });
 
@@ -217,7 +270,7 @@ export const ChatWorkspace: React.FC = () => {
 
           const assistantMsg: Message = {
             id: res.message_id,
-            conversation_id: activeConv.id,
+            conversation_id: targetConv!.id,
             role: 'assistant',
             content: fullAnswer,
             generated_sql: res.generated_sql || undefined,
@@ -262,7 +315,7 @@ export const ChatWorkspace: React.FC = () => {
         ...prev,
         {
           id: `err_${Date.now()}`,
-          conversation_id: activeConv.id,
+          conversation_id: targetConv?.id || activeConv?.id || '',
           role: 'assistant',
           content: `I encountered an issue processing your request: ${err.message || 'Unknown error'}`,
           created_at: new Date().toISOString(),

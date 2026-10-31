@@ -285,7 +285,7 @@ export class DatabaseManager {
         const tableName = fromMatch[1].toLowerCase();
         let rows = [...this.getTableData(tableName)];
 
-        // Simple WHERE filters
+        // Generic & parameter-based WHERE filters
         if (upper.includes('WHERE')) {
           if (upper.includes('SALARY >')) {
             const numMatch = upper.match(/SALARY\s*>\s*(\d+)/);
@@ -307,11 +307,39 @@ export class DatabaseManager {
           if (upper.includes('DEPARTMENT_ID = 1')) {
             rows = rows.filter(r => r.department_id === 1);
           }
+
+          // Match parameterized clauses like col = $1, col = $2
+          if (params && params.length > 0) {
+            const paramMatches = [...trimmed.matchAll(/([a-zA-Z0-9_]+)\s*=\s*\$(\d+)/g)];
+            for (const pm of paramMatches) {
+              const col = pm[1].toLowerCase();
+              const pIdx = parseInt(pm[2], 10) - 1;
+              const val = params[pIdx];
+              if (val !== undefined) {
+                rows = rows.filter(r => {
+                  const rVal = r[col];
+                  if (rVal === undefined || rVal === null) return val === null;
+                  return String(rVal).toLowerCase() === String(val).toLowerCase();
+                });
+              }
+            }
+          }
         }
 
-        // Simple ORDER BY
-        if (upper.includes('ORDER BY SALARY DESC')) {
-          rows.sort((a, b) => (Number(b.salary) || 0) - (Number(a.salary) || 0));
+        // Aggregate functions: COUNT(*)
+        if (upper.includes('COUNT(*)')) {
+          return { rows: [{ count: rows.length }] as any };
+        }
+
+        // Sorting
+        if (upper.includes('ORDER BY')) {
+          if (upper.includes('SALARY DESC')) {
+            rows.sort((a, b) => (Number(b.salary) || 0) - (Number(a.salary) || 0));
+          } else if (upper.includes('CREATED_AT DESC')) {
+            rows.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+          } else if (upper.includes('CREATED_AT ASC')) {
+            rows.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+          }
         }
 
         // Simple LIMIT
@@ -327,14 +355,38 @@ export class DatabaseManager {
 
     // 2. INSERT statement
     if (upper.startsWith('INSERT INTO')) {
-      const match = upper.match(/INSERT INTO\s+([a-zA-Z0-9_]+)/);
+      const match = trimmed.match(/INSERT\s+INTO\s+([a-zA-Z0-9_]+)(?:\s*\(([^)]+)\))?/i);
       if (match) {
         const table = match[1].toLowerCase();
         const records = this.getTableData(table);
-        const newRecord: any = { id: records.length + 1 };
-        if (params && params.length > 0) {
+        const colList = match[2] ? match[2].split(',').map(c => c.trim().toLowerCase()) : [];
+        const newRecord: any = {
+          id: (params && params[0] && typeof params[0] === 'string' && params[0].startsWith('ds_')) ? params[0] : (records.length + 1),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+
+        if (colList.length > 0 && params && params.length > 0) {
+          colList.forEach((col, idx) => {
+            if (idx < params.length) {
+              newRecord[col] = params[idx];
+            }
+          });
+        } else if (params && params.length > 0) {
           newRecord.data = params;
         }
+
+        // Handle conflict or unique ID
+        const recId = newRecord.id;
+        if (recId) {
+          const existingIdx = records.findIndex(r => r.id === recId);
+          if (existingIdx !== -1) {
+            records[existingIdx] = { ...records[existingIdx], ...newRecord };
+            this.setTableData(table, records);
+            return { rows: [records[existingIdx]] as any };
+          }
+        }
+
         records.push(newRecord);
         this.setTableData(table, records);
         return { rows: [newRecord] as any };
@@ -343,21 +395,36 @@ export class DatabaseManager {
 
     // 3. UPDATE statement
     if (upper.startsWith('UPDATE')) {
-      const match = upper.match(/UPDATE\s+([a-zA-Z0-9_]+)/);
+      const match = trimmed.match(/UPDATE\s+([a-zA-Z0-9_]+)/i);
       if (match) {
         const table = match[1].toLowerCase();
         const records = this.getTableData(table);
+        // If WHERE id = $1
+        if (params && params.length > 0) {
+          const targetId = params[params.length - 1];
+          const found = records.find(r => r.id === targetId);
+          if (found) {
+            return { rows: [found] as any };
+          }
+        }
         return { rows: records as any };
       }
     }
 
     // 4. DELETE statement
     if (upper.startsWith('DELETE FROM')) {
-      const match = upper.match(/DELETE FROM\s+([a-zA-Z0-9_]+)/);
+      const match = trimmed.match(/DELETE\s+FROM\s+([a-zA-Z0-9_]+)/i);
       if (match) {
         const table = match[1].toLowerCase();
         const records = this.getTableData(table);
+        if (params && params.length > 0) {
+          const targetId = params[0];
+          const remaining = records.filter(r => r.id !== targetId && r.project_id !== targetId);
+          this.setTableData(table, remaining);
+          return { rows: [] as any };
+        }
         const deleted = records.slice(0, 1);
+        this.setTableData(table, records.slice(1));
         return { rows: deleted as any };
       }
     }
