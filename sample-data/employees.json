@@ -1,0 +1,112 @@
+[
+  {
+    "employee_id": 1,
+    "first_name": "Arman",
+    "last_name": "Khan",
+    "email": "arman.khan@company.com",
+    "department_id": 1,
+    "role": "Lead Architect",
+    "salary": 145000,
+    "hire_date": "2021-03-15",
+    "performance_rating": 4.9
+  },
+  {
+    "employee_id": 2,
+    "first_name": "Sarah",
+    "last_name": "Connor",
+    "email": "sarah.connor@company.com",
+    "department_id": 1,
+    "role": "Senior Backend Engineer",
+    "salary": 128000,
+    "hire_date": "2021-06-01",
+    "performance_rating": 4.7
+  },
+  {
+    "employee_id": 3,
+    "first_name": "Rahul",
+    "last_name": "Sharma",
+    "email": "rahul.sharma@company.com",
+    "department_id": 4,
+    "role": "HR Manager",
+    "salary": 78000,
+    "hire_date": "2020-01-10",
+    "performance_rating": 4.5
+  },
+  {
+    "employee_id": 4,
+    "first_name": "Elena",
+    "last_name": "Rostova",
+    "email": "elena.rostova@company.com",
+    "department_id": 2,
+    "role": "Principal Product Designer",
+    "salary": 115000,
+    "hire_date": "2022-02-18",
+    "performance_rating": 4.8
+  },
+  {
+    "employee_id": 5,
+    "first_name": "David",
+    "last_name": "Miller",
+    "email": "david.miller@company.com",
+    "department_id": 3,
+    "role": "Sales Director",
+    "salary": 132000,
+    "hire_date": "2019-11-05",
+    "performance_rating": 4.6
+  },
+  {
+    "employee_id": 6,
+    "first_name": "Amina",
+    "last_name": "Zubair",
+    "email": "amina.zubair@company.com",
+    "department_id": 1,
+    "role": "Full Stack Engineer",
+    "salary": 98000,
+    "hire_date": "2023-01-20",
+    "performance_rating": 4.4
+  },
+  {
+    "employee_id": 7,
+    "first_name": "Marcus",
+    "last_name": "Vance",
+    "email": "marcus.vance@company.com",
+    "department_id": 5,
+    "role": "Financial Controller",
+    "salary": 105000,
+    "hire_date": "2021-08-12",
+    "performance_rating": 4.3
+  },
+  {
+    "employee_id": 8,
+    "first_name": "Priya",
+    "last_name": "Patel",
+    "email": "priya.patel@company.com",
+    "department_id": 3,
+    "role": "Account Executive",
+    "salary": 82000,
+    "hire_date": "2022-07-01",
+    "performance_rating": 4.5
+  },
+  {
+    "employee_id": 9,
+    "first_name": "Liam",
+    "last_name": "O'Connor",
+    "email": "liam.oconnor@company.com",
+    "department_id": null,
+    "role": "Independent Contractor",
+    "salary": 65000,
+    "hire_date": "2024-01-15",
+    "performance_rating": 3.9
+  },
+  {
+    "employee_id": 10,
+    "first_name": "Maya",
+    "last_name": "Lin",
+    "email": "maya.lin@company.com",
+    "department_id": 1,
+    "role": "Data Scientist",
+    "salary": 122000,
+    "hire_date": "2022-09-10",
+    "performance_rating": 4.8
+  }
+]

@@ -1,0 +1,34 @@
+[
+  {
+    "project_id": 101,
+    "project_name": "AI Analytics Engine",
+    "status": "Active",
+    "budget": 450000,
+    "start_date": "2023-01-01",
+    "end_date": "2024-12-31"
+  },
+  {
+    "project_id": 102,
+    "project_name": "Cloud Infrastructure Migration",
+    "status": "Active",
+    "budget": 300000,
+    "start_date": "2023-06-15",
+    "end_date": "2024-06-30"
+  },
+  {
+    "project_id": 103,
+    "project_name": "Customer Portal Redesign",
+    "status": "Completed",
+    "budget": 180000,
+    "start_date": "2022-09-01",
+    "end_date": "2023-05-31"
+  },
+  {
+    "project_id": 104,
+    "project_name": "Enterprise Security Hardening",
+    "status": "Active",
+    "budget": 220000,
+    "start_date": "2023-11-01",
+    "end_date": "2024-08-31"
+  }
+]

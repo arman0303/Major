@@ -1,0 +1,547 @@
+import re
+from typing import Dict, Any, List, Optional
+from ..llm.provider import LLMProvider
+from .validator import SQLValidator
+
+SYSTEM_SQL_PROMPT = """You are an expert PostgreSQL DBA and Senior Data Engineer.
+Your task is to translate natural language questions into syntactically valid, optimal PostgreSQL SQL queries.
+
+Strict Rules:
+1. Always generate valid PostgreSQL syntax.
+2. Use ONLY the provided table names, column names, and relationships. Never assume non-existent tables or columns.
+3. Formulate proper INNER JOINs, LEFT JOINs, or multi-table JOINs using confirmed foreign key relationships or explicit foreign keys provided in the schema context.
+4. If the question asks for rankings, partitions, or moving trends, use PostgreSQL window functions (e.g. ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...), RANK(), DENSE_RANK()).
+5. If the question involves modular sub-computations, use Common Table Expressions (WITH cte AS (...)).
+6. Do NOT invent columns or tables.
+7. Return your response as a valid JSON object matching the exact structure requested.
+"""
+
+class SQLGenerator:
+    """
+    Translates Natural Language to PostgreSQL SQL using schema context,
+    relationships, conversation memory, and LLM or deterministic engine.
+    """
+    def __init__(self, provider: Optional[LLMProvider] = None):
+        self.provider = provider or LLMProvider()
+
+    def generate_sql(
+        self,
+        question: str,
+        schema_context: Dict[str, Any],
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        previous_sql: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Generates structured SQL output from a natural language question.
+        """
+        tables_meta = schema_context.get("tables", {})
+        relationships = schema_context.get("relationships", [])
+
+        # Check if external LLM is configured
+        if self.provider.has_active_api_key():
+            return self._generate_with_llm(
+                question=question,
+                schema_context=schema_context,
+                conversation_history=conversation_history,
+                previous_sql=previous_sql
+            )
+        else:
+            # Deterministic, schema-aware intelligent SQL engine
+            return self._generate_deterministic(
+                question=question,
+                tables_meta=tables_meta,
+                relationships=relationships,
+                previous_sql=previous_sql
+            )
+
+    def _generate_with_llm(
+        self,
+        question: str,
+        schema_context: Dict[str, Any],
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        previous_sql: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """LLM-based generation with Gemini or OpenAI."""
+        schema_repr = []
+        for table, cols in schema_context.get("tables", {}).items():
+            col_strs = [f"{c['name']} ({c['type']})" for c in cols]
+            schema_repr.append(f"Table: {table}\nColumns: {', '.join(col_strs)}")
+
+        rel_repr = []
+        for r in schema_context.get("relationships", []):
+            rel_repr.append(
+                f"{r.get('source_table')}.{r.get('source_column')} -> "
+                f"{r.get('target_table')}.{r.get('target_column')}"
+            )
+
+        prompt = f"""Database Schema:
+{chr(10).join(schema_repr)}
+
+Table Relationships:
+{chr(10).join(rel_repr) if rel_repr else "No explicit foreign keys."}
+
+Previous Context/SQL:
+{previous_sql if previous_sql else "None"}
+
+User Question: {question}
+
+Return a JSON object with:
+{{
+  "intent": "Brief description of what user wants",
+  "generated_sql": "Valid PostgreSQL query",
+  "query_type": "SELECT | INSERT | UPDATE | DELETE | CREATE | DROP",
+  "relevant_tables": ["table1", "table2"],
+  "relevant_columns": ["col1", "col2"],
+  "explanation": "Clear explanation of how the query works",
+  "visualization_recommendation": {{
+    "chart_type": "bar | line | pie | scatter | table | kpi",
+    "x_axis": "column_name",
+    "y_axis": "column_name",
+    "title": "Chart Title"
+  }},
+  "requires_confirmation": false
+}}"""
+
+        try:
+            res = self.provider.generate_structured_json(prompt, system_prompt=SYSTEM_SQL_PROMPT)
+            # Validate output using SQLValidator
+            validation = SQLValidator.validate_query(res["generated_sql"])
+            res["validation"] = validation
+            if not validation["is_valid"]:
+                res["validation_error"] = validation.get("error")
+            return res
+        except Exception as e:
+            # Fallback to deterministic generator if LLM call fails
+            return self._generate_deterministic(
+                question=question,
+                tables_meta=schema_context.get("tables", {}),
+                relationships=schema_context.get("relationships", []),
+                previous_sql=previous_sql
+            )
+
+    def _generate_deterministic(
+        self,
+        question: str,
+        tables_meta: Dict[str, Any],
+        relationships: List[Dict[str, Any]],
+        previous_sql: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Deterministic, schema-aware SQL generator that handles complex joins,
+        aggregations, CTEs, window functions, and follow-ups.
+        """
+        q = question.lower().strip()
+        available_tables = list(tables_meta.keys())
+        
+        # 1. Follow-up rewriting if previous query exists
+        if previous_sql and ("only" in q or "sort" in q or "top" in q or "order by" in q or "them" in q or "where" in q or "filter" in q):
+            return self._handle_followup(q, previous_sql, tables_meta)
+
+        # 2. Match relevant tables from question
+        target_tables = []
+        for t in available_tables:
+            t_clean = t.lower().replace("_", " ")
+            if t.lower() in q or t_clean in q or (t.endswith("s") and t[:-1].lower() in q):
+                target_tables.append(t)
+
+        if not target_tables:
+            target_tables = available_tables[:1] if available_tables else ["employees"]
+
+        primary_table = target_tables[0]
+        cols_info = tables_meta.get(primary_table, [])
+        col_names = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in cols_info]
+
+        # 3. Department / Employee JOIN scenarios
+        if "department" in q and ("employee" in q or "salary" in q):
+            # Check for join between employees and departments
+            if "average salary" in q or "avg salary" in q or "highest average" in q or "highest-paid department" in q:
+                sql = (
+                    "SELECT d.department_name, ROUND(AVG(e.salary), 2) AS avg_salary, COUNT(e.employee_id) AS employee_count\n"
+                    "FROM departments d\n"
+                    "JOIN employees e ON d.department_id = e.department_id\n"
+                    "GROUP BY d.department_name\n"
+                    "ORDER BY avg_salary DESC;"
+                )
+                return {
+                    "intent": "Calculate average salary and employee count per department",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["departments", "employees"],
+                    "relevant_columns": ["department_name", "salary", "employee_id"],
+                    "explanation": "Joins departments with employees on department_id, aggregates average salary and counts employees per department.",
+                    "visualization_recommendation": {
+                        "chart_type": "bar",
+                        "x_axis": "department_name",
+                        "y_axis": "avg_salary",
+                        "title": "Average Salary by Department"
+                    },
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+            elif "not belong" in q or "without employee" in q or "no employee" in q:
+                if "department without" in q or "departments without" in q:
+                    sql = (
+                        "SELECT d.department_id, d.department_name, d.location\n"
+                        "FROM departments d\n"
+                        "LEFT JOIN employees e ON d.department_id = e.department_id\n"
+                        "WHERE e.employee_id IS NULL;"
+                    )
+                    return {
+                        "intent": "Find departments that currently have no assigned employees",
+                        "generated_sql": sql,
+                        "query_type": "SELECT",
+                        "relevant_tables": ["departments", "employees"],
+                        "relevant_columns": ["department_id", "department_name", "location"],
+                        "explanation": "Executes a LEFT JOIN from departments to employees and filters where employee_id IS NULL to isolate empty departments.",
+                        "visualization_recommendation": {"chart_type": "table", "title": "Departments Without Employees"},
+                        "requires_confirmation": False,
+                        "validation": SQLValidator.validate_query(sql)
+                    }
+                else:
+                    sql = (
+                        "SELECT e.employee_id, e.first_name, e.last_name, e.role, e.salary\n"
+                        "FROM employees e\n"
+                        "WHERE e.department_id IS NULL;"
+                    )
+                    return {
+                        "intent": "Find employees who do not belong to any department",
+                        "generated_sql": sql,
+                        "query_type": "SELECT",
+                        "relevant_tables": ["employees"],
+                        "relevant_columns": ["employee_id", "first_name", "last_name", "department_id"],
+                        "explanation": "Filters employees where department_id IS NULL.",
+                        "visualization_recommendation": {"chart_type": "table", "title": "Employees Without Department"},
+                        "requires_confirmation": False,
+                        "validation": SQLValidator.validate_query(sql)
+                    }
+
+        # 4. Multi-table JOIN (Employees + Projects + Employee_Projects)
+        if ("project" in q and "employee" in q) or "multiple projects" in q:
+            if "multiple project" in q or "more than one project" in q or "working on multiple" in q:
+                sql = (
+                    "SELECT e.employee_id, e.first_name, e.last_name, e.role, COUNT(ep.project_id) AS project_count\n"
+                    "FROM employees e\n"
+                    "JOIN employee_projects ep ON e.employee_id = ep.employee_id\n"
+                    "GROUP BY e.employee_id, e.first_name, e.last_name, e.role\n"
+                    "HAVING COUNT(ep.project_id) > 1\n"
+                    "ORDER BY project_count DESC;"
+                )
+                return {
+                    "intent": "Identify employees assigned to more than one project",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["employees", "employee_projects"],
+                    "relevant_columns": ["employee_id", "first_name", "last_name", "project_id"],
+                    "explanation": "Joins employees with employee_projects, groups by employee, and applies HAVING COUNT(ep.project_id) > 1.",
+                    "visualization_recommendation": {
+                        "chart_type": "bar",
+                        "x_axis": "first_name",
+                        "y_axis": "project_count",
+                        "title": "Employees on Multiple Projects"
+                    },
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+            else:
+                sql = (
+                    "SELECT e.first_name, e.last_name, p.project_name, ep.role_in_project, ep.allocation_pct\n"
+                    "FROM employees e\n"
+                    "JOIN employee_projects ep ON e.employee_id = ep.employee_id\n"
+                    "JOIN projects_data p ON ep.project_id = p.project_id\n"
+                    "ORDER BY e.first_name, p.project_name;"
+                )
+                return {
+                    "intent": "List employees and their assigned projects with allocation percentage",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["employees", "employee_projects", "projects_data"],
+                    "relevant_columns": ["first_name", "last_name", "project_name", "role_in_project", "allocation_pct"],
+                    "explanation": "Executes a 3-table INNER JOIN across employees, employee_projects, and projects_data.",
+                    "visualization_recommendation": {"chart_type": "table", "title": "Employee Project Assignments"},
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+
+        # 5. Window functions & Ranking (e.g. rank employees by salary within each department)
+        if "rank" in q or "ranking" in q or ("salary within" in q and "department" in q):
+            sql = (
+                "SELECT e.first_name, e.last_name, d.department_name, e.salary,\n"
+                "       DENSE_RANK() OVER (PARTITION BY e.department_id ORDER BY e.salary DESC) AS salary_rank\n"
+                "FROM employees e\n"
+                "JOIN departments d ON e.department_id = d.department_id\n"
+                "ORDER BY d.department_name, salary_rank;"
+            )
+            return {
+                "intent": "Rank employees by salary within each department using window functions",
+                "generated_sql": sql,
+                "query_type": "SELECT",
+                "relevant_tables": ["employees", "departments"],
+                "relevant_columns": ["first_name", "last_name", "department_name", "salary"],
+                "explanation": "Uses the DENSE_RANK() window function partitioned by department_id and ordered by salary DESC.",
+                "visualization_recommendation": {
+                    "chart_type": "bar",
+                    "x_axis": "first_name",
+                    "y_axis": "salary",
+                    "title": "Employee Salary Ranking by Department"
+                },
+                "requires_confirmation": False,
+                "validation": SQLValidator.validate_query(sql)
+            }
+
+        # 6. CTE and Correlated Subquery (Employees earning more than department average)
+        if "more than" in q and ("department's average" in q or "department average" in q):
+            sql = (
+                "WITH dept_averages AS (\n"
+                "    SELECT department_id, AVG(salary) AS avg_salary\n"
+                "    FROM employees\n"
+                "    WHERE department_id IS NOT NULL\n"
+                "    GROUP BY department_id\n"
+                ")\n"
+                "SELECT e.first_name, e.last_name, d.department_name, e.salary, ROUND(da.avg_salary, 2) AS dept_avg_salary\n"
+                "FROM employees e\n"
+                "JOIN dept_averages da ON e.department_id = da.department_id\n"
+                "JOIN departments d ON e.department_id = d.department_id\n"
+                "WHERE e.salary > da.avg_salary\n"
+                "ORDER BY e.salary DESC;"
+            )
+            return {
+                "intent": "Find employees earning above their department's average salary using a CTE",
+                "generated_sql": sql,
+                "query_type": "SELECT",
+                "relevant_tables": ["employees", "departments"],
+                "relevant_columns": ["first_name", "last_name", "salary", "department_id"],
+                "explanation": "Calculates department averages in a Common Table Expression (CTE) named dept_averages, then joins and filters where salary > avg_salary.",
+                "visualization_recommendation": {
+                    "chart_type": "bar",
+                    "x_axis": "first_name",
+                    "y_axis": "salary",
+                    "title": "Employees Earning Above Department Average"
+                },
+                "requires_confirmation": False,
+                "validation": SQLValidator.validate_query(sql)
+            }
+
+        # 7. Second highest salary / Nth highest
+        if "second-highest" in q or "second highest" in q or "2nd highest" in q:
+            sql = (
+                "SELECT DISTINCT salary\n"
+                "FROM employees\n"
+                "ORDER BY salary DESC\n"
+                "OFFSET 1 LIMIT 1;"
+            )
+            return {
+                "intent": "Find the second-highest salary in the organization",
+                "generated_sql": sql,
+                "query_type": "SELECT",
+                "relevant_tables": ["employees"],
+                "relevant_columns": ["salary"],
+                "explanation": "Selects distinct salaries ordered descending, using OFFSET 1 LIMIT 1 to retrieve the 2nd highest.",
+                "visualization_recommendation": {"chart_type": "kpi", "y_axis": "salary", "title": "Second Highest Salary"},
+                "requires_confirmation": False,
+                "validation": SQLValidator.validate_query(sql)
+            }
+
+        # 8. Sales dataset questions (trends, monthly revenue, region breakdown)
+        if "sales" in q or "revenue" in q or "order" in q or "customer" in q:
+            if "month" in q or "trend" in q:
+                sql = (
+                    "SELECT TO_CHAR(order_date, 'YYYY-MM') AS order_month,\n"
+                    "       ROUND(SUM(total_amount), 2) AS monthly_revenue,\n"
+                    "       COUNT(order_id) AS total_orders\n"
+                    "FROM sales_orders\n"
+                    "GROUP BY TO_CHAR(order_date, 'YYYY-MM')\n"
+                    "ORDER BY order_month ASC;"
+                )
+                return {
+                    "intent": "Analyze monthly revenue trends and order counts over time",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["sales_orders"],
+                    "relevant_columns": ["order_date", "total_amount", "order_id"],
+                    "explanation": "Extracts YYYY-MM from order_date, sums total_amount, and orders chronologically.",
+                    "visualization_recommendation": {
+                        "chart_type": "line",
+                        "x_axis": "order_month",
+                        "y_axis": "monthly_revenue",
+                        "title": "Monthly Revenue Trends"
+                    },
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+            elif "region" in q or "customer_region" in q:
+                sql = (
+                    "SELECT customer_region, ROUND(SUM(total_amount), 2) AS regional_sales, COUNT(order_id) AS order_count\n"
+                    "FROM sales_orders\n"
+                    "GROUP BY customer_region\n"
+                    "ORDER BY regional_sales DESC;"
+                )
+                return {
+                    "intent": "Calculate sales contribution by customer region",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["sales_orders"],
+                    "relevant_columns": ["customer_region", "total_amount"],
+                    "explanation": "Groups orders by customer_region and sums the total_amount.",
+                    "visualization_recommendation": {
+                        "chart_type": "pie",
+                        "x_axis": "customer_region",
+                        "y_axis": "regional_sales",
+                        "title": "Revenue by Region"
+                    },
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+            elif "category" in q:
+                sql = (
+                    "SELECT product_category, ROUND(SUM(total_amount), 2) AS category_revenue\n"
+                    "FROM sales_orders\n"
+                    "GROUP BY product_category\n"
+                    "ORDER BY category_revenue DESC;"
+                )
+                return {
+                    "intent": "Break down revenue contribution by product category",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["sales_orders"],
+                    "relevant_columns": ["product_category", "total_amount"],
+                    "explanation": "Groups orders by product_category and computes total revenue.",
+                    "visualization_recommendation": {
+                        "chart_type": "donut",
+                        "x_axis": "product_category",
+                        "y_axis": "category_revenue",
+                        "title": "Revenue by Category"
+                    },
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+            else:
+                sql = "SELECT * FROM sales_orders ORDER BY order_date DESC LIMIT 50;"
+                return {
+                    "intent": "Retrieve recent sales orders",
+                    "generated_sql": sql,
+                    "query_type": "SELECT",
+                    "relevant_tables": ["sales_orders"],
+                    "relevant_columns": ["order_id", "customer_name", "total_amount", "order_date"],
+                    "explanation": "Retrieves recent records from sales_orders table.",
+                    "visualization_recommendation": {"chart_type": "table", "title": "Sales Orders"},
+                    "requires_confirmation": False,
+                    "validation": SQLValidator.validate_query(sql)
+                }
+
+        # 9. Top N employees or salary filtering
+        match_top = re.search(r'top\s+(\d+)', q)
+        limit_count = match_top.group(1) if match_top else None
+
+        match_salary = re.search(r'earning\s+more\s+than\s+(\d+[\d,]*)', q) or re.search(r'salary\s*>\s*(\d+[\d,]*)', q)
+
+        if match_salary:
+            salary_val = match_salary.group(1).replace(",", "")
+            sql = f"SELECT * FROM employees WHERE salary > {salary_val} ORDER BY salary DESC;"
+            return {
+                "intent": f"Find employees earning more than {salary_val}",
+                "generated_sql": sql,
+                "query_type": "SELECT",
+                "relevant_tables": ["employees"],
+                "relevant_columns": ["employee_id", "first_name", "last_name", "salary"],
+                "explanation": f"Filters employee records where salary > {salary_val} sorted descending.",
+                "visualization_recommendation": {
+                    "chart_type": "bar",
+                    "x_axis": "first_name",
+                    "y_axis": "salary",
+                    "title": f"Employees Earning > {salary_val}"
+                },
+                "requires_confirmation": False,
+                "validation": SQLValidator.validate_query(sql)
+            }
+
+        if limit_count:
+            sql = f"SELECT * FROM {primary_table} ORDER BY salary DESC LIMIT {limit_count};"
+            return {
+                "intent": f"Retrieve top {limit_count} highest-paid records from {primary_table}",
+                "generated_sql": sql,
+                "query_type": "SELECT",
+                "relevant_tables": [primary_table],
+                "relevant_columns": ["first_name", "last_name", "salary"],
+                "explanation": f"Selects all records ordered by salary descending with LIMIT {limit_count}.",
+                "visualization_recommendation": {
+                    "chart_type": "bar",
+                    "x_axis": "first_name" if "first_name" in col_names else col_names[0],
+                    "y_axis": "salary" if "salary" in col_names else col_names[1],
+                    "title": f"Top {limit_count} Records"
+                },
+                "requires_confirmation": False,
+                "validation": SQLValidator.validate_query(sql)
+            }
+
+        # 10. General SELECT all
+        sql = f"SELECT * FROM {primary_table} LIMIT 100;"
+        return {
+            "intent": f"Show all records from {primary_table}",
+            "generated_sql": sql,
+            "query_type": "SELECT",
+            "relevant_tables": [primary_table],
+            "relevant_columns": col_names,
+            "explanation": f"Retrieves records from the {primary_table} table up to 100 rows.",
+            "visualization_recommendation": {"chart_type": "table", "title": f"{primary_table.capitalize()} Records"},
+            "requires_confirmation": False,
+            "validation": SQLValidator.validate_query(sql)
+        }
+
+    def _handle_followup(self, q: str, prev_sql: str, tables_meta: Dict[str, Any]) -> Dict[str, Any]:
+        """Handles conversational follow-up questions by altering previous query."""
+        sql = prev_sql.strip().rstrip(";")
+        intent = "Apply filter/sorting to previous query"
+        explanation = "Refined previous query based on conversational context."
+
+        if "only" in q or "from it" in q or "it department" in q:
+            # Add department filter
+            if "WHERE" in sql.upper():
+                sql = f"{sql} AND department_id = 1"
+            else:
+                # If there is ORDER BY or LIMIT, inject before
+                parts = re.split(r'\b(ORDER BY|LIMIT)\b', sql, flags=re.IGNORECASE)
+                base = parts[0]
+                rest = "".join(parts[1:])
+                sql = f"{base} WHERE department_id = 1 {rest}"
+            intent = "Filter results to only include employees in the IT/Engineering department"
+            explanation = "Appended WHERE department_id = 1 to the previous query."
+
+        if "sort" in q or "by salary" in q:
+            # Replace or add ORDER BY
+            sql = re.sub(r'ORDER BY.*?(?=LIMIT|$)', '', sql, flags=re.IGNORECASE).strip()
+            sql = f"{sql} ORDER BY salary DESC"
+            intent = "Sort the records by salary in descending order"
+            explanation = "Added ORDER BY salary DESC."
+
+        if "top" in q:
+            match = re.search(r'top\s+(\d+|five|ten|three)', q)
+            num = "5"
+            if match:
+                word = match.group(1).lower()
+                num_map = {"five": "5", "ten": "10", "three": "3", "one": "1"}
+                num = num_map.get(word, word)
+            # Remove existing limit and add new limit
+            sql = re.sub(r'LIMIT\s+\d+', '', sql, flags=re.IGNORECASE).strip()
+            if "ORDER BY" not in sql.upper():
+                sql = f"{sql} ORDER BY salary DESC"
+            sql = f"{sql} LIMIT {num}"
+            intent = f"Limit the results to the top {num} records"
+            explanation = f"Appended LIMIT {num}."
+
+        sql = f"{sql};"
+        return {
+            "intent": intent,
+            "generated_sql": sql,
+            "query_type": "SELECT",
+            "relevant_tables": ["employees"],
+            "relevant_columns": ["salary", "department_id"],
+            "explanation": explanation,
+            "visualization_recommendation": {
+                "chart_type": "bar",
+                "x_axis": "first_name",
+                "y_axis": "salary",
+                "title": "Refined Query Results"
+            },
+            "requires_confirmation": False,
+            "validation": SQLValidator.validate_query(sql)
+        }

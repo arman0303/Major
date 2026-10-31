@@ -1,0 +1,10 @@
+[
+  { "employee_id": 1, "project_id": 101, "role_in_project": "Technical Lead", "allocation_pct": 60 },
+  { "employee_id": 1, "project_id": 102, "role_in_project": "Advisory Architect", "allocation_pct": 40 },
+  { "employee_id": 2, "project_id": 101, "role_in_project": "Backend Engineer", "allocation_pct": 70 },
+  { "employee_id": 2, "project_id": 104, "role_in_project": "Security Implementer", "allocation_pct": 30 },
+  { "employee_id": 4, "project_id": 101, "role_in_project": "UX Lead", "allocation_pct": 50 },
+  { "employee_id": 4, "project_id": 103, "role_in_project": "Design Systems Lead", "allocation_pct": 50 },
+  { "employee_id": 6, "project_id": 102, "role_in_project": "DevOps Engineer", "allocation_pct": 100 },
+  { "employee_id": 10, "project_id": 101, "role_in_project": "Lead ML Researcher", "allocation_pct": 100 }
+]
