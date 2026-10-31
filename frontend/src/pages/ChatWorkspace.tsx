@@ -1,9 +1,27 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
-  Send, Plus, Search, Bot, User as UserIcon, Code2,
-  Trash2, Edit3, Check, X, Loader2, FileText,
-  Database, MessageSquare, ChevronLeft, ChevronRight,
-  Copy, CheckCheck, AlertTriangle, Sparkles,
+  Send,
+  Sparkles,
+  Bot,
+  User as UserIcon,
+  Code2,
+  Table as TableIcon,
+  CheckCircle2,
+  AlertTriangle,
+  Play,
+  RotateCcw,
+  Sliders,
+  Copy,
+  CheckCheck,
+  Paperclip,
+  Database,
+  BarChart3,
+  FileText,
+  Loader2,
+  ChevronDown,
+  ArrowUp,
+  ExternalLink,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { api, ChatResponse, DocumentSource } from '../services/api';
@@ -13,436 +31,169 @@ import { RightPanel } from '../components/RightPanel';
 import { ConfirmationModal } from '../components/ConfirmationModal';
 import { cn } from '../utils/cn';
 
-// ── Suggested prompts that vary by type ──────────────────────────────────────
-const SUGGESTED_PROMPTS = [
-  { text: 'Show the average salary of every department', icon: '📊' },
-  { text: 'Find employees working on multiple projects', icon: '👥' },
-  { text: 'What is the difference between INNER JOIN and LEFT JOIN?', icon: '📚' },
-  { text: 'Rank employees by salary within each department', icon: '🏆' },
-  { text: 'Show monthly revenue trends', icon: '📈' },
-  { text: 'Find employees earning more than their department average', icon: '💰' },
+const SUGGESTIONS = [
+  { title: 'Show average salary', desc: 'Grouped by department with employee count' },
+  { title: 'Find high earners', desc: 'Employees earning more than their department average' },
+  { title: 'Multiple projects', desc: 'Find staff members allocated to multiple initiatives' },
+  { title: 'Explain Database Indexes', desc: 'Understand how B-Tree indexes speed up lookups' },
 ];
 
-// ── Intent badge colors ───────────────────────────────────────────────────────
-const INTENT_COLORS: Record<string, string> = {
-  sql_analytics: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300',
-  document_qa: 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300',
-  general_knowledge: 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300',
-  greeting: 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
-  schema_management: 'bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300',
-  data_modification: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
-  hybrid: 'bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300',
-};
-
-const INTENT_LABELS: Record<string, string> = {
-  sql_analytics: '⚡ SQL Query',
-  document_qa: '📄 Document',
-  general_knowledge: '💡 Knowledge',
-  greeting: '👋 Chat',
-  schema_management: '🏗️ Schema',
-  data_modification: '✏️ Mutation',
-  hybrid: '🔀 Hybrid',
-  ambiguous: '❓ Clarifying',
-};
-
-// ── Copy button hook ──────────────────────────────────────────────────────────
 function useCopyToClipboard() {
-  const [copied, setCopied] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const copy = (text: string, id: string) => {
     navigator.clipboard.writeText(text).then(() => {
-      setCopied(id);
-      setTimeout(() => setCopied(null), 2000);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
     });
   };
-  return { copied, copy };
+  return { copiedId, copy };
 }
 
-// ── Conversation Sidebar Item ─────────────────────────────────────────────────
-interface ConvItemProps {
-  conv: Conversation;
-  isActive: boolean;
-  onSelect: () => void;
-  onRename: (newTitle: string) => void;
-  onDelete: () => void;
-}
-
-const ConvItem: React.FC<ConvItemProps> = ({ conv, isActive, onSelect, onRename, onDelete }) => {
-  const [editing, setEditing] = useState(false);
-  const [editTitle, setEditTitle] = useState(conv.title);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (editing) inputRef.current?.focus();
-  }, [editing]);
-
-  const handleRename = () => {
-    if (editTitle.trim() && editTitle.trim() !== conv.title) {
-      onRename(editTitle.trim());
-    }
-    setEditing(false);
-  };
-
-  return (
-    <div
-      className={cn(
-        'group flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer transition-colors text-sm',
-        isActive
-          ? 'bg-primary/10 text-primary'
-          : 'hover:bg-muted text-muted-foreground hover:text-foreground'
-      )}
-      onClick={() => !editing && onSelect()}
-    >
-      <MessageSquare className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-
-      {editing ? (
-        <input
-          ref={inputRef}
-          className="flex-1 bg-transparent outline-none text-foreground text-xs min-w-0"
-          value={editTitle}
-          onChange={e => setEditTitle(e.target.value)}
-          onBlur={handleRename}
-          onKeyDown={e => {
-            if (e.key === 'Enter') handleRename();
-            if (e.key === 'Escape') setEditing(false);
-          }}
-          onClick={e => e.stopPropagation()}
-        />
-      ) : (
-        <span className="flex-1 truncate text-xs leading-relaxed">{conv.title}</span>
-      )}
-
-      <div className="hidden group-hover:flex items-center gap-0.5 shrink-0">
-        <button
-          className="p-0.5 hover:text-primary rounded"
-          onClick={e => { e.stopPropagation(); setEditing(true); setEditTitle(conv.title); }}
-          title="Rename"
-        >
-          <Edit3 className="w-3 h-3" />
-        </button>
-        <button
-          className="p-0.5 hover:text-destructive rounded"
-          onClick={e => { e.stopPropagation(); onDelete(); }}
-          title="Delete"
-        >
-          <Trash2 className="w-3 h-3" />
-        </button>
-      </div>
-    </div>
-  );
-};
-
-// ── Message Bubble ────────────────────────────────────────────────────────────
-interface MessageBubbleProps {
-  msg: Message;
-  onViewInPanel: () => void;
-}
-
-const MessageBubble: React.FC<MessageBubbleProps> = ({ msg, onViewInPanel }) => {
-  const { copied, copy } = useCopyToClipboard();
-  const isUser = msg.role === 'user';
-  const intent = (msg as any).intent_type;
-
-  const content = typeof msg.content === 'string'
-    ? msg.content
-    : (msg as any).explanation?.simple || 'Processed.';
-
-  return (
-    <div className={cn('flex gap-3 max-w-4xl', isUser ? 'ml-auto flex-row-reverse' : '')}>
-      {/* Avatar */}
-      <div className={cn(
-        'w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1',
-        isUser ? 'bg-primary text-primary-foreground' : 'bg-muted border border-border'
-      )}>
-        {isUser ? <UserIcon className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
-      </div>
-
-      {/* Content */}
-      <div className={cn('flex flex-col gap-1 max-w-[85%]', isUser ? 'items-end' : 'items-start')}>
-        {/* Intent badge for assistant */}
-        {!isUser && intent && INTENT_LABELS[intent] && (
-          <span className={cn(
-            'text-[10px] font-medium px-2 py-0.5 rounded-full',
-            INTENT_COLORS[intent] || 'bg-muted text-muted-foreground'
-          )}>
-            {INTENT_LABELS[intent]}
-          </span>
-        )}
-
-        {/* Message bubble */}
-        <div className={cn(
-          'rounded-2xl px-4 py-2.5 text-sm leading-relaxed',
-          isUser
-            ? 'bg-primary text-primary-foreground rounded-tr-sm'
-            : 'bg-card border border-border rounded-tl-sm text-foreground'
-        )}>
-          {/* Error state */}
-          {msg.error_message && !msg.query_result && (
-            <div className="flex items-center gap-2 text-destructive mb-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              <span className="text-xs">Query failed</span>
-            </div>
-          )}
-
-          {/* Main content with basic markdown */}
-          <div className="whitespace-pre-wrap">{content}</div>
-
-          {/* Document sources */}
-          {(msg as any).document_sources && (msg as any).document_sources.length > 0 && (
-            <div className="mt-2 pt-2 border-t border-border/50">
-              <p className="text-xs text-muted-foreground mb-1">Sources:</p>
-              <div className="flex flex-wrap gap-1">
-                {((msg as any).document_sources as DocumentSource[]).slice(0, 3).map((src, i) => (
-                  <span key={i} className="text-[10px] bg-muted px-2 py-0.5 rounded-full">
-                    📄 {src.metadata?.source || 'Document'}
-                    {src.metadata?.page_number ? ` p.${src.metadata.page_number}` : ''}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Action buttons for assistant messages with SQL/results */}
-        {!isUser && (msg.generated_sql || msg.query_result) && (
-          <div className="flex items-center gap-2 px-1">
-            {msg.generated_sql && (
-              <button
-                onClick={() => copy(msg.generated_sql!, msg.id + '-sql')}
-                className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
-              >
-                {copied === msg.id + '-sql' ? <CheckCheck className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                Copy SQL
-              </button>
-            )}
-            {msg.query_result && (
-              <button
-                onClick={onViewInPanel}
-                className="flex items-center gap-1 text-[11px] text-primary hover:text-primary/80 transition-colors"
-              >
-                <Database className="w-3 h-3" />
-                View Results
-              </button>
-            )}
-            {msg.execution_time_ms !== undefined && msg.execution_time_ms > 0 && (
-              <span className="text-[11px] text-muted-foreground">
-                {msg.execution_time_ms}ms
-              </span>
-            )}
-          </div>
-        )}
-
-        {/* Inline mini result preview for SQL responses */}
-        {!isUser && msg.query_result && msg.query_result.records && msg.query_result.records.length > 0 && (
-          <div className="w-full mt-1 rounded-xl border border-border overflow-hidden bg-card">
-            <div className="overflow-x-auto max-h-40">
-              <table className="w-full text-xs">
-                <thead className="bg-muted/50">
-                  <tr>
-                    {msg.query_result.columns?.slice(0, 6).map(col => (
-                      <th key={col} className="px-3 py-1.5 text-left font-medium text-muted-foreground whitespace-nowrap">{col}</th>
-                    ))}
-                    {(msg.query_result.columns?.length || 0) > 6 && (
-                      <th className="px-3 py-1.5 text-left text-muted-foreground">+{(msg.query_result.columns?.length || 0) - 6} more</th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {msg.query_result.records.slice(0, 4).map((row, i) => (
-                    <tr key={i} className="border-t border-border/50">
-                      {msg.query_result!.columns?.slice(0, 6).map(col => (
-                        <td key={col} className="px-3 py-1.5 text-foreground whitespace-nowrap">
-                          {row[col] === null || row[col] === undefined ? (
-                            <span className="text-muted-foreground italic">null</span>
-                          ) : String(row[col]).length > 30
-                            ? String(row[col]).slice(0, 27) + '...'
-                            : String(row[col])
-                          }
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {(msg.query_result.row_count || 0) > 4 && (
-              <div className="px-3 py-1 border-t border-border/50 bg-muted/30">
-                <button onClick={onViewInPanel} className="text-[11px] text-primary hover:underline">
-                  View all {msg.query_result.row_count} rows →
-                </button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Requires confirmation notice */}
-        {!isUser && msg.requires_confirmation && msg.confirmation_status === 'pending' && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-yellow-500/40 bg-yellow-50 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-300 text-xs w-full">
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-            <span>This operation modifies data. Review the SQL in the right panel before confirming.</span>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
-
-// ── Main ChatWorkspace ────────────────────────────────────────────────────────
 export const ChatWorkspace: React.FC = () => {
   const { activeProject } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeConvIdFromUrl = searchParams.get('c');
 
-  // Sidebar
-  const [conversations, setConversations] = useState<Conversation[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-
-  // Active conversation
   const [activeConv, setActiveConv] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [inputPrompt, setInputPrompt] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [inputPrompt, setInputPrompt] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [streamingContent, setStreamingContent] = useState<string>('');
 
-  // Right panel state
-  const [activeSql, setActiveSql] = useState('');
+  // Right Inspector Panel
+  const [activeSql, setActiveSql] = useState<string>('');
   const [activeResult, setActiveResult] = useState<QueryResult | undefined>(undefined);
   const [activeViz, setActiveViz] = useState<VisualizationConfig | undefined>(undefined);
   const [activeDuration, setActiveDuration] = useState<number | undefined>(undefined);
   const [activeError, setActiveError] = useState<string | null>(null);
-  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isInspectorOpen, setIsInspectorOpen] = useState<boolean>(false);
 
-  // Confirmation modal
+  // Mutation confirmation modal
   const [pendingConfirmationSql, setPendingConfirmationSql] = useState<string | null>(null);
+
+  // File upload directly in chat
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { copiedId, copy } = useCopyToClipboard();
 
-  // ── Load conversations ──
-  const loadConversations = useCallback(async () => {
-    if (!activeProject) return;
-    try {
-      const res = await api.listConversations(activeProject.id, searchQuery || undefined);
-      setConversations(res.conversations);
-    } catch (err) {
-      console.error('Failed to load conversations:', err);
-    }
-  }, [activeProject, searchQuery]);
-
-  useEffect(() => {
-    if (activeProject) {
-      loadConversations();
-    }
-  }, [activeProject, searchQuery]);
-
-  // Auto-create or load first conversation
-  useEffect(() => {
-    if (!activeProject) return;
-    api.listConversations(activeProject.id)
-      .then(res => {
-        setConversations(res.conversations);
-        if (res.conversations.length > 0) {
-          loadConversation(res.conversations[0].id);
-        } else {
-          createNewConversation();
-        }
-      })
-      .catch(console.error);
-  }, [activeProject?.id]);
-
+  // Load or switch conversation
   const loadConversation = async (convId: string) => {
     try {
       const res = await api.getConversation(convId);
       setActiveConv(res.conversation);
       setMessages(res.messages);
 
-      // Prime inspector with latest result
-      const last = [...res.messages].reverse().find(m => m.role === 'assistant' && m.generated_sql);
-      if (last) {
-        setActiveSql(last.generated_sql || '');
-        setActiveResult(last.query_result);
-        setActiveViz(last.visualization_config);
-        setActiveDuration(last.execution_time_ms);
-        setActiveError(last.error_message || null);
+      // Restore inspector with last SQL if available
+      const lastWithSql = [...res.messages].reverse().find(m => m.role === 'assistant' && m.generated_sql);
+      if (lastWithSql) {
+        setActiveSql(lastWithSql.generated_sql || '');
+        setActiveResult(lastWithSql.query_result);
+        setActiveViz(lastWithSql.visualization_config);
+        setActiveDuration(lastWithSql.execution_time_ms);
+        setActiveError(lastWithSql.error_message || null);
       }
     } catch (err) {
       console.error('Failed to load conversation:', err);
     }
   };
 
-  const createNewConversation = async () => {
+  useEffect(() => {
     if (!activeProject) return;
-    try {
-      const res = await api.createConversation(activeProject.id, 'New Chat');
-      setConversations(prev => [res.conversation, ...prev]);
-      setActiveConv(res.conversation);
-      setMessages([]);
-      setActiveSql('');
-      setActiveResult(undefined);
-      setActiveViz(undefined);
-      setActiveError(null);
-    } catch (err) {
-      console.error('Failed to create conversation:', err);
-    }
-  };
 
-  const handleRenameConversation = async (convId: string, newTitle: string) => {
-    try {
-      await api.updateConversation(convId, newTitle);
-      setConversations(prev => prev.map(c => c.id === convId ? { ...c, title: newTitle } : c));
-      if (activeConv?.id === convId) {
-        setActiveConv(prev => prev ? { ...prev, title: newTitle } : prev);
-      }
-    } catch (err) {
-      console.error('Failed to rename:', err);
-    }
-  };
-
-  const handleDeleteConversation = async (convId: string) => {
-    try {
-      await api.deleteConversation(convId);
-      setConversations(prev => prev.filter(c => c.id !== convId));
-      if (activeConv?.id === convId) {
-        const remaining = conversations.filter(c => c.id !== convId);
-        if (remaining.length > 0) {
-          loadConversation(remaining[0].id);
+    if (activeConvIdFromUrl) {
+      loadConversation(activeConvIdFromUrl);
+    } else {
+      // Fetch latest or create new
+      api.listConversations(activeProject.id).then(res => {
+        if (res.conversations && res.conversations.length > 0) {
+          const first = res.conversations[0];
+          setSearchParams({ c: first.id }, { replace: true });
+          loadConversation(first.id);
         } else {
-          createNewConversation();
+          api.createConversation(activeProject.id, 'New Chat').then(cRes => {
+            setActiveConv(cRes.conversation);
+            setSearchParams({ c: cRes.conversation.id }, { replace: true });
+            window.dispatchEvent(new CustomEvent('chat-updated'));
+          });
         }
-      }
-    } catch (err) {
-      console.error('Failed to delete:', err);
+      });
     }
-  };
+  }, [activeProject?.id, activeConvIdFromUrl]);
 
-  // Auto-scroll
+  // Listen for sidebar switches
+  useEffect(() => {
+    const handleSwitch = (e: any) => {
+      if (e.detail?.id) {
+        loadConversation(e.detail.id);
+      }
+    };
+    window.addEventListener('chat-switched', handleSwitch);
+    return () => window.removeEventListener('chat-switched', handleSwitch);
+  }, []);
+
+  // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isLoading]);
+  }, [messages, streamingContent, isLoading]);
 
   // Auto-resize textarea
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 160)}px`;
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
     }
   }, [inputPrompt]);
 
-  // ── Send Message ──
-  const handleSendMessage = async (customPrompt?: string) => {
-    const text = (customPrompt || inputPrompt).trim();
+  // Direct File Upload in Chat
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeProject) return;
+
+    setIsUploading(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('projectId', activeProject.id);
+
+    try {
+      const res = await api.uploadDataset(formData);
+      // Add a system-like message indicating file is uploaded and indexed
+      const uploadNotice: Message = {
+        id: `upload_${Date.now()}`,
+        conversation_id: activeConv?.id || '',
+        role: 'assistant',
+        content: `📁 **Dataset Uploaded**: "${file.name}" has been uploaded and profiled (${res.dataset.row_count} records). You can now ask questions or run queries on this dataset!`,
+        created_at: new Date().toISOString(),
+      };
+      setMessages(prev => [...prev, uploadNotice]);
+      window.dispatchEvent(new CustomEvent('chat-updated'));
+    } catch (err: any) {
+      alert(`File upload failed: ${err.message}`);
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // Send Message with Simulated Typing / Token Stream
+  const handleSendMessage = async (textToSend?: string) => {
+    const text = (textToSend || inputPrompt).trim();
     if (!text || !activeConv || !activeProject || isLoading) return;
 
     setInputPrompt('');
     setIsLoading(true);
 
-    // Optimistic user message
-    const tempId = `temp_${Date.now()}`;
-    const tempUserMsg: Message = {
-      id: tempId,
+    const tempUserId = `usr_${Date.now()}`;
+    const userMsg: Message = {
+      id: tempUserId,
       conversation_id: activeConv.id,
       role: 'user',
       content: text,
       created_at: new Date().toISOString(),
     };
-    setMessages(prev => [...prev, tempUserMsg]);
+    setMessages(prev => [...prev, userMsg]);
 
     try {
       const res: ChatResponse = await api.chat({
@@ -451,60 +202,72 @@ export const ChatWorkspace: React.FC = () => {
         message: text,
       });
 
-      // Replace temp message + add assistant response
-      const assistantMsg: Message = {
-        id: res.message_id,
-        conversation_id: activeConv.id,
-        role: 'assistant',
-        content: res.answer || res.explanation || 'Processed.',
-        generated_sql: res.generated_sql || undefined,
-        query_result: res.query_result,
-        visualization_config: res.visualization_config,
-        requires_confirmation: res.requires_confirmation,
-        confirmation_status: res.requires_confirmation ? 'pending' : 'none',
-        execution_time_ms: res.execution_time_ms,
-        error_message: res.error_message || undefined,
-        created_at: new Date().toISOString(),
-        // Extra fields
-        ...(res.intent ? { intent_type: res.intent } : {}),
-        ...(res.document_sources ? { document_sources: res.document_sources } : {}),
-      } as any;
+      // Stream effect for ChatGPT feel
+      const fullAnswer = res.answer || res.explanation || 'Processed successfully.';
+      setStreamingContent('');
 
-      setMessages(prev => [...prev.filter(m => m.id !== tempId), assistantMsg]);
+      // Quick progressive typewriter animation
+      let currentIdx = 0;
+      const chunkSize = Math.max(1, Math.floor(fullAnswer.length / 25));
+      const interval = setInterval(() => {
+        currentIdx += chunkSize;
+        if (currentIdx >= fullAnswer.length) {
+          clearInterval(interval);
+          setStreamingContent('');
 
-      // Update inspector
-      if (res.generated_sql) {
-        setActiveSql(res.generated_sql);
-        setIsInspectorOpen(true);
-      }
-      if (res.query_result) {
-        setActiveResult(res.query_result);
-      }
-      setActiveViz(res.visualization_config);
-      setActiveDuration(res.execution_time_ms);
-      setActiveError(res.error_message || null);
+          const assistantMsg: Message = {
+            id: res.message_id,
+            conversation_id: activeConv.id,
+            role: 'assistant',
+            content: fullAnswer,
+            generated_sql: res.generated_sql || undefined,
+            query_result: res.query_result,
+            visualization_config: res.visualization_config,
+            requires_confirmation: res.requires_confirmation,
+            confirmation_status: res.requires_confirmation ? 'pending' : 'none',
+            execution_time_ms: res.execution_time_ms,
+            error_message: res.error_message || undefined,
+            created_at: new Date().toISOString(),
+            ...(res.intent ? { intent_type: res.intent } : {}),
+            ...(res.document_sources ? { document_sources: res.document_sources } : {}),
+          } as any;
 
-      // Handle DDL confirmation for schema management
-      if (res.requires_confirmation && res.generated_sql) {
-        setPendingConfirmationSql(res.generated_sql);
-      }
+          setMessages(prev => [...prev, assistantMsg]);
 
-      // Refresh conversation title if it changed
-      const updatedConvs = await api.listConversations(activeProject.id);
-      setConversations(updatedConvs.conversations);
-      const updatedConv = updatedConvs.conversations.find(c => c.id === activeConv.id);
-      if (updatedConv) setActiveConv(updatedConv);
+          if (res.generated_sql) {
+            setActiveSql(res.generated_sql);
+            if (res.query_result) {
+              setActiveResult(res.query_result);
+              setIsInspectorOpen(true);
+            }
+          }
+          setActiveViz(res.visualization_config);
+          setActiveDuration(res.execution_time_ms);
+          setActiveError(res.error_message || null);
+
+          if (res.requires_confirmation && res.generated_sql) {
+            setPendingConfirmationSql(res.generated_sql);
+          }
+
+          setIsLoading(false);
+          window.dispatchEvent(new CustomEvent('chat-updated'));
+        } else {
+          setStreamingContent(fullAnswer.slice(0, currentIdx));
+        }
+      }, 25);
 
     } catch (err: any) {
-      setMessages(prev => prev.filter(m => m.id !== tempId).concat({
-        id: `err_${Date.now()}`,
-        conversation_id: activeConv.id,
-        role: 'assistant',
-        content: `I encountered an error: ${err.message || 'Request failed. Please try again.'}`,
-        created_at: new Date().toISOString(),
-      }));
-    } finally {
       setIsLoading(false);
+      setMessages(prev => [
+        ...prev,
+        {
+          id: `err_${Date.now()}`,
+          conversation_id: activeConv.id,
+          role: 'assistant',
+          content: `I encountered an issue processing your request: ${err.message || 'Unknown error'}`,
+          created_at: new Date().toISOString(),
+        },
+      ]);
     }
   };
 
@@ -513,6 +276,15 @@ export const ChatWorkspace: React.FC = () => {
       e.preventDefault();
       handleSendMessage();
     }
+  };
+
+  const handleOpenInspector = (msg: Message) => {
+    if (msg.generated_sql) setActiveSql(msg.generated_sql);
+    setActiveResult(msg.query_result);
+    setActiveViz(msg.visualization_config);
+    setActiveDuration(msg.execution_time_ms);
+    setActiveError(msg.error_message || null);
+    setIsInspectorOpen(true);
   };
 
   const handleConfirmMutation = async () => {
@@ -530,15 +302,18 @@ export const ChatWorkspace: React.FC = () => {
       setPendingConfirmationSql(null);
 
       if (activeConv) {
-        setMessages(prev => [...prev, {
-          id: `conf_${Date.now()}`,
-          conversation_id: activeConv.id,
-          role: 'assistant',
-          content: `Operation completed: ${res.row_count} row(s) affected.`,
-          generated_sql: pendingConfirmationSql,
-          query_result: { records: res.records, columns: res.columns, row_count: res.row_count },
-          created_at: new Date().toISOString(),
-        }]);
+        setMessages(prev => [
+          ...prev,
+          {
+            id: `conf_${Date.now()}`,
+            conversation_id: activeConv.id,
+            role: 'assistant',
+            content: `Operation successfully executed: ${res.row_count} row(s) updated.`,
+            generated_sql: pendingConfirmationSql,
+            query_result: { records: res.records, columns: res.columns, row_count: res.row_count },
+            created_at: new Date().toISOString(),
+          },
+        ]);
       }
     } catch (err: any) {
       setActiveError(err.message);
@@ -546,202 +321,274 @@ export const ChatWorkspace: React.FC = () => {
     }
   };
 
-  const handleViewInPanel = (msg: Message) => {
-    setActiveSql(msg.generated_sql || '');
-    setActiveResult(msg.query_result);
-    setActiveViz(msg.visualization_config);
-    setActiveDuration(msg.execution_time_ms);
-    setActiveError(msg.error_message || null);
-    setIsInspectorOpen(true);
-  };
-
-  const handleExecuteFromInspector = async (customSql?: string) => {
-    const query = customSql || activeSql;
-    if (!query || !activeProject) return;
-    try {
-      const res = await api.executeSQL({ projectId: activeProject.id, sql: query, isConfirmed: true });
-      setActiveResult({ records: res.records, columns: res.columns, row_count: res.row_count });
-      setActiveDuration(res.execution_time_ms);
-      setActiveError(null);
-    } catch (err: any) {
-      setActiveError(err.message);
-    }
-  };
-
-  const isEmpty = messages.length === 0;
-
   return (
-    <div className="flex h-full w-full overflow-hidden">
-      {/* ── Left Chat History Sidebar ── */}
-      <div className={cn(
-        'flex flex-col border-r border-border bg-card/40 transition-all duration-200 shrink-0',
-        sidebarOpen ? 'w-64' : 'w-0 overflow-hidden'
-      )}>
-        {sidebarOpen && (
-          <>
-            {/* New Chat button */}
-            <div className="p-3 border-b border-border">
-              <button
-                onClick={createNewConversation}
-                className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90 transition-colors"
-              >
-                <Plus className="w-4 h-4" />
-                New Chat
-              </button>
-            </div>
-
-            {/* Search */}
-            <div className="p-3 border-b border-border">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-                <input
-                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-muted rounded-lg outline-none focus:ring-1 focus:ring-primary/50 placeholder:text-muted-foreground"
-                  placeholder="Search chats..."
-                  value={searchQuery}
-                  onChange={e => setSearchQuery(e.target.value)}
-                />
-              </div>
-            </div>
-
-            {/* Conversation list */}
-            <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-              {conversations.length === 0 ? (
-                <div className="text-center text-xs text-muted-foreground py-8">
-                  {searchQuery ? 'No chats match your search' : 'No chats yet'}
-                </div>
-              ) : (
-                conversations.map(conv => (
-                  <ConvItem
-                    key={conv.id}
-                    conv={conv}
-                    isActive={activeConv?.id === conv.id}
-                    onSelect={() => loadConversation(conv.id)}
-                    onRename={newTitle => handleRenameConversation(conv.id, newTitle)}
-                    onDelete={() => handleDeleteConversation(conv.id)}
-                  />
-                ))
-              )}
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* Toggle sidebar */}
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="absolute left-0 top-1/2 -translate-y-1/2 z-10 w-4 h-8 bg-border hover:bg-muted-foreground/20 rounded-r flex items-center justify-center transition-colors"
-        style={{ left: sidebarOpen ? '256px' : '0' }}
-      >
-        {sidebarOpen ? <ChevronLeft className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-      </button>
-
-      {/* ── Central Conversation Column ── */}
-      <div className="flex-1 flex flex-col h-full bg-background overflow-hidden relative">
-        {/* Header */}
-        <div className="h-14 px-6 border-b border-border flex items-center justify-between bg-card/60 backdrop-blur shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="font-semibold text-sm text-foreground truncate max-w-xs">
-              {activeConv?.title || 'No conversation selected'}
+    <div className="flex h-full w-full overflow-hidden bg-background">
+      {/* ── Main Chat Column ── */}
+      <div className="flex-1 flex flex-col h-full overflow-hidden relative">
+        {/* Top Minimal Bar */}
+        <header className="h-14 border-b border-border/60 px-6 flex items-center justify-between shrink-0 bg-background/50 backdrop-blur z-10">
+          <div className="flex items-center gap-2">
+            <h1 className="font-semibold text-sm text-foreground truncate max-w-sm">
+              {activeConv?.title || 'New Conversation'}
+            </h1>
+            <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium">
+              PostgreSQL
             </span>
           </div>
+
           <div className="flex items-center gap-2">
-            <span className="text-xs text-muted-foreground hidden sm:inline">
-              {activeProject?.name}
-            </span>
             <button
               onClick={() => setIsInspectorOpen(!isInspectorOpen)}
               className={cn(
-                'flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border transition-colors',
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-all',
                 isInspectorOpen
                   ? 'bg-primary/10 border-primary/30 text-primary'
-                  : 'border-border text-muted-foreground hover:text-foreground'
+                  : 'border-border/80 text-muted-foreground hover:text-foreground hover:bg-muted'
               )}
             >
               <Code2 className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">SQL Panel</span>
+              <span>SQL Inspector</span>
+              {activeResult?.row_count !== undefined && (
+                <span className="ml-1 text-[10px] px-1.5 py-0.2 rounded-full bg-primary/20 text-primary">
+                  {activeResult.row_count}
+                </span>
+              )}
             </button>
           </div>
-        </div>
+        </header>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-6">
-          {isEmpty ? (
-            <div className="flex flex-col items-center justify-center h-full text-center gap-6 max-w-2xl mx-auto">
-              <div className="w-16 h-16 rounded-2xl bg-primary/10 flex items-center justify-center">
-                <Sparkles className="w-8 h-8 text-primary" />
+        {/* Messages Scroll Area */}
+        <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 space-y-6">
+          {messages.length === 0 ? (
+            <div className="h-full max-w-2xl mx-auto flex flex-col justify-center items-center text-center space-y-6 my-auto pt-16">
+              <div className="w-14 h-14 rounded-2xl bg-primary/10 flex items-center justify-center text-primary shadow-sm">
+                <Sparkles className="w-7 h-7" />
               </div>
-              <div>
-                <h2 className="text-2xl font-bold text-foreground mb-2">What would you like to analyze?</h2>
-                <p className="text-muted-foreground text-sm max-w-md">
-                  Ask a database question, query your data, explore uploaded documents, or ask anything about SQL and data analysis.
+              <div className="space-y-2">
+                <h2 className="text-2xl font-bold text-foreground">How can I help with your data today?</h2>
+                <p className="text-xs text-muted-foreground max-w-md mx-auto">
+                  Ask natural language database questions, explore uploaded datasets, understand SQL concepts, or generate queries with schema awareness.
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-2 w-full max-w-lg">
-                {SUGGESTED_PROMPTS.map((p, i) => (
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full pt-4">
+                {SUGGESTIONS.map((s, idx) => (
                   <button
-                    key={i}
-                    onClick={() => handleSendMessage(p.text)}
-                    className="flex items-start gap-2 text-left px-3 py-2.5 rounded-xl border border-border bg-card hover:bg-muted hover:border-primary/30 transition-colors text-sm"
+                    key={idx}
+                    onClick={() => handleSendMessage(s.title)}
+                    className="flex flex-col items-start p-3.5 rounded-xl border border-border/70 hover:border-primary/50 bg-card hover:bg-muted/40 transition-all text-left group shadow-xs"
                   >
-                    <span className="text-base shrink-0">{p.icon}</span>
-                    <span className="text-foreground text-xs leading-relaxed">{p.text}</span>
+                    <span className="text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
+                      {s.title}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground mt-0.5 line-clamp-1">
+                      {s.desc}
+                    </span>
                   </button>
                 ))}
               </div>
             </div>
           ) : (
-            messages.map(msg => (
-              <MessageBubble
-                key={msg.id}
-                msg={msg}
-                onViewInPanel={() => handleViewInPanel(msg)}
-              />
-            ))
-          )}
+            <div className="max-w-3xl mx-auto space-y-6">
+              {messages.map(msg => {
+                const isUser = msg.role === 'user';
+                return (
+                  <div key={msg.id} className={cn('flex gap-3.5 text-sm', isUser ? 'justify-end' : 'justify-start')}>
+                    {!isUser && (
+                      <div className="w-7 h-7 rounded-lg bg-primary/15 border border-primary/20 text-primary flex items-center justify-center shrink-0 mt-0.5">
+                        <Bot className="w-4 h-4" />
+                      </div>
+                    )}
 
-          {/* Loading indicator */}
-          {isLoading && (
-            <div className="flex gap-3">
-              <div className="w-8 h-8 rounded-full bg-muted border border-border flex items-center justify-center">
-                <Bot className="w-4 h-4" />
-              </div>
-              <div className="bg-card border border-border rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                <span className="text-sm text-muted-foreground">Analyzing your request…</span>
-              </div>
+                    <div className={cn('flex flex-col gap-1 max-w-[85%]', isUser ? 'items-end' : 'items-start')}>
+                      <div
+                        className={cn(
+                          'px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-xs',
+                          isUser
+                            ? 'bg-primary text-primary-foreground rounded-tr-xs'
+                            : 'bg-card border border-border/80 text-foreground rounded-tl-xs'
+                        )}
+                      >
+                        <div className="whitespace-pre-wrap">{msg.content}</div>
+
+                        {/* Inline Data Preview Table if SQL results exist */}
+                        {!isUser && msg.query_result && msg.query_result.records?.length > 0 && (
+                          <div className="mt-3 pt-3 border-t border-border/60 w-full space-y-2">
+                            <div className="flex items-center justify-between text-xs text-muted-foreground">
+                              <span className="font-semibold text-foreground flex items-center gap-1.5">
+                                <TableIcon className="w-3.5 h-3.5 text-primary" />
+                                {msg.query_result.row_count} rows returned
+                              </span>
+                              <button
+                                onClick={() => handleOpenInspector(msg)}
+                                className="text-primary hover:underline text-[11px] font-medium"
+                              >
+                                Open Visualization →
+                              </button>
+                            </div>
+
+                            <div className="overflow-x-auto rounded-lg border border-border/60 max-h-48 text-xs">
+                              <table className="w-full text-left">
+                                <thead className="bg-muted/70 text-muted-foreground">
+                                  <tr>
+                                    {msg.query_result.columns?.slice(0, 5).map(col => (
+                                      <th key={col} className="px-2.5 py-1.5 font-medium whitespace-nowrap">
+                                        {col}
+                                      </th>
+                                    ))}
+                                    {(msg.query_result.columns?.length || 0) > 5 && (
+                                      <th className="px-2.5 py-1.5 font-medium text-muted-foreground">...</th>
+                                    )}
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border/40">
+                                  {msg.query_result.records.slice(0, 3).map((row, rIdx) => (
+                                    <tr key={rIdx} className="hover:bg-muted/30">
+                                      {msg.query_result!.columns?.slice(0, 5).map(col => (
+                                        <td key={col} className="px-2.5 py-1.5 whitespace-nowrap text-foreground font-mono text-[11px]">
+                                          {String(row[col] ?? 'null')}
+                                        </td>
+                                      ))}
+                                      {(msg.query_result!.columns?.length || 0) > 5 && (
+                                        <td className="px-2.5 py-1.5 text-muted-foreground">...</td>
+                                      )}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Document Source Citations */}
+                        {!isUser && (msg as any).document_sources?.length > 0 && (
+                          <div className="mt-2.5 pt-2 border-t border-border/50 flex flex-wrap gap-1.5">
+                            <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Citations:</span>
+                            {((msg as any).document_sources as DocumentSource[]).map((src, i) => (
+                              <span
+                                key={i}
+                                className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-muted-foreground border border-border flex items-center gap-1"
+                              >
+                                <FileText className="w-2.5 h-2.5" />
+                                {src.metadata?.source || 'Doc'}
+                                {src.metadata?.page_number && ` (p. ${src.metadata.page_number})`}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Action buttons under message */}
+                      {!isUser && (msg.generated_sql || msg.query_result) && (
+                        <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+                          {msg.generated_sql && (
+                            <button
+                              onClick={() => copy(msg.generated_sql!, msg.id + '-sql')}
+                              className="flex items-center gap-1 hover:text-foreground transition-colors text-[11px]"
+                            >
+                              {copiedId === msg.id + '-sql' ? (
+                                <CheckCheck className="w-3.5 h-3.5 text-emerald-500" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                              <span>Copy SQL</span>
+                            </button>
+                          )}
+                          {msg.execution_time_ms !== undefined && msg.execution_time_ms > 0 && (
+                            <span className="text-[10px]">• {msg.execution_time_ms}ms</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
+                    {isUser && (
+                      <div className="w-7 h-7 rounded-lg bg-primary text-primary-foreground flex items-center justify-center shrink-0 mt-0.5">
+                        <UserIcon className="w-4 h-4" />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Real-time Streaming Placeholder */}
+              {isLoading && streamingContent && (
+                <div className="flex gap-3.5 text-sm justify-start">
+                  <div className="w-7 h-7 rounded-lg bg-primary/15 border border-primary/20 text-primary flex items-center justify-center shrink-0 mt-0.5">
+                    <Bot className="w-4 h-4" />
+                  </div>
+                  <div className="px-4 py-3 rounded-2xl bg-card border border-border/80 text-foreground rounded-tl-xs shadow-xs max-w-[85%]">
+                    <div className="whitespace-pre-wrap">{streamingContent}</div>
+                    <span className="inline-block w-1.5 h-4 bg-primary animate-pulse ml-0.5 align-middle" />
+                  </div>
+                </div>
+              )}
+
+              {/* Loading Thinking Indicator */}
+              {isLoading && !streamingContent && (
+                <div className="flex gap-3.5 text-sm justify-start items-center">
+                  <div className="w-7 h-7 rounded-lg bg-primary/15 border border-primary/20 text-primary flex items-center justify-center shrink-0">
+                    <Bot className="w-4 h-4" />
+                  </div>
+                  <div className="px-3 py-2 rounded-xl bg-card border border-border text-muted-foreground text-xs flex items-center gap-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+                    <span>Analyzing database schema & intent...</span>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
             </div>
           )}
-
-          <div ref={messagesEndRef} />
         </div>
 
-        {/* Input area */}
-        <div className="px-4 pb-4 pt-2 border-t border-border bg-background/80 backdrop-blur">
-          <div className="flex items-end gap-2 max-w-4xl mx-auto">
-            <div className="flex-1 flex items-end gap-2 bg-card border border-border rounded-2xl px-4 py-2 focus-within:border-primary/50 transition-colors">
+        {/* ── ChatGPT Style Bottom Floating Input Bar ── */}
+        <div className="p-4 md:px-8 border-t border-border/60 bg-background/80 backdrop-blur shrink-0">
+          <div className="max-w-3xl mx-auto space-y-2">
+            <div className="relative flex items-center bg-card border border-border/80 rounded-2xl shadow-sm focus-within:ring-2 focus-within:ring-primary/30 focus-within:border-primary transition-all p-2">
+              {/* Attachment file icon */}
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileUpload}
+                accept=".csv,.json,.pdf,.txt"
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading || isLoading}
+                className="p-2 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 shrink-0"
+                title="Upload Dataset (CSV, JSON, PDF, TXT)"
+              >
+                {isUploading ? <Loader2 className="w-4 h-4 animate-spin text-primary" /> : <Paperclip className="w-4 h-4" />}
+              </button>
+
+              {/* Textarea */}
               <textarea
                 ref={textareaRef}
-                className="flex-1 bg-transparent outline-none resize-none text-sm text-foreground placeholder:text-muted-foreground min-h-[36px] max-h-40 py-1"
-                placeholder="Ask a question, request SQL, or explore your documents…"
                 value={inputPrompt}
                 onChange={e => setInputPrompt(e.target.value)}
                 onKeyDown={handleKeyDown}
                 rows={1}
-                disabled={isLoading || !activeConv}
+                placeholder="Ask anything about your database or upload a dataset..."
+                className="flex-1 bg-transparent px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground outline-none resize-none max-h-40 min-h-[38px]"
+                disabled={isLoading}
               />
+
+              {/* Submit button */}
+              <button
+                onClick={() => handleSendMessage()}
+                disabled={!inputPrompt.trim() || isLoading}
+                className="w-8 h-8 rounded-xl bg-primary text-primary-foreground flex items-center justify-center hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-all shrink-0 ml-1 shadow-xs"
+              >
+                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+              </button>
             </div>
-            <button
-              onClick={() => handleSendMessage()}
-              disabled={!inputPrompt.trim() || isLoading || !activeConv}
-              className="w-10 h-10 rounded-xl bg-primary text-primary-foreground flex items-center justify-center hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
-            >
-              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            </button>
+
+            <p className="text-[11px] text-center text-muted-foreground">
+              Conversational SQL Analytics Assistant · PostgreSQL & pgvector schema grounded
+            </p>
           </div>
-          <p className="text-center text-[10px] text-muted-foreground mt-1.5">
-            Press Enter to send · Shift+Enter for new line
-          </p>
         </div>
       </div>
 
@@ -752,12 +599,18 @@ export const ChatWorkspace: React.FC = () => {
         vizConfig={activeViz}
         executionTime={activeDuration}
         error={activeError}
-        onExecute={handleExecuteFromInspector}
+        onExecute={customSql => {
+          if (!activeProject) return;
+          api.executeSQL({ projectId: activeProject.id, sql: customSql || activeSql, isConfirmed: true }).then(res => {
+            setActiveResult({ records: res.records, columns: res.columns, row_count: res.row_count });
+            setActiveDuration(res.execution_time_ms);
+          });
+        }}
         isOpen={isInspectorOpen}
         onToggle={() => setIsInspectorOpen(!isInspectorOpen)}
       />
 
-      {/* Confirmation Modal */}
+      {/* Confirmation Modal for destructive mutations */}
       {pendingConfirmationSql && (
         <ConfirmationModal
           isOpen={!!pendingConfirmationSql}

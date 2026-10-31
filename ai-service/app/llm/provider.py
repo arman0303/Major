@@ -81,6 +81,52 @@ class LLMProvider:
         # If no external API key is configured, return notification
         raise ValueError(f"No active API credentials for provider '{self.provider}'. Please configure GEMINI_API_KEY or OPENAI_API_KEY in settings or .env.")
 
+    def generate_stream(self, prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.1):
+        """Streams text chunks from configured LLM provider."""
+        if self.provider == "gemini" and self._gemini_client:
+            try:
+                full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+                response = self._gemini_client.generate_content(
+                    full_prompt,
+                    generation_config={"temperature": temperature},
+                    stream=True
+                )
+                for chunk in response:
+                    if chunk.text:
+                        yield chunk.text
+                return
+            except Exception as e:
+                logger.error(f"Gemini streaming error: {e}")
+                raise e
+
+        elif self.provider == "openai" and self._openai_client:
+            try:
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": prompt})
+
+                response = self._openai_client.chat.completions.create(
+                    model=settings.OPENAI_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    stream=True
+                )
+                for chunk in response:
+                    delta = chunk.choices[0].delta.content if chunk.choices else ""
+                    if delta:
+                        yield delta
+                return
+            except Exception as e:
+                logger.error(f"OpenAI streaming error: {e}")
+                raise e
+
+        # Local simulated stream fallback when no API key
+        text = self.generate_completion(prompt, system_prompt, temperature)
+        words = text.split(" ")
+        for i, word in enumerate(words):
+            yield word + (" " if i < len(words) - 1 else "")
+
     def generate_structured_json(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """Generates structured JSON response from LLM."""
         json_sys_prompt = (
