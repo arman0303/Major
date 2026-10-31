@@ -22,13 +22,13 @@ class EmbeddingService:
         if self.provider.provider == "gemini" and self.provider.api_key:
             try:
                 import google.generativeai as genai
+                genai.configure(api_key=self.provider.api_key)
                 res = genai.embed_content(
-                    model="models/text-embedding-004",
+                    model=settings.GEMINI_EMBEDDING_MODEL,
                     content=text,
                     task_type="retrieval_document"
                 )
                 embedding = res["embedding"]
-                # Adjust to 768 dim if necessary
                 return self._normalize(embedding[:self.dimension])
             except Exception:
                 pass

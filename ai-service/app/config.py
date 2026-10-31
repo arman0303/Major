@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     # LLM Provider settings
     DEFAULT_LLM_PROVIDER: str = os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY", None)
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    GEMINI_EMBEDDING_MODEL: str = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-001")
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY", None)
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
