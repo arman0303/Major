@@ -1,5 +1,4 @@
-import { DatabaseManager } from '../src/config/db.js';
-import { SQLValidator } from '../../ai-service/app/sql/validator.py'; // Tested via AI service
+import { DatabaseManager } from '../src/config/db';
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
