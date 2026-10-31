@@ -86,16 +86,45 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
       ]
     );
 
-    // If PDF, index text into RAG
-    if (fileExt === 'pdf' && profileData?.text_content) {
+    // If PDF or text file, index chunks into RAG store and register in uploaded_files
+    if ((fileExt === 'pdf' || fileExt === 'txt') && (profileData?.text_content || profileData?.chunks)) {
       try {
-        await axios.post(`${config.aiServiceUrl}/api/ai/rag/index`, {
-          project_id: projectId,
-          content: profileData.text_content,
-          metadata: { file_name: file.originalname, dataset_id: datasetId }
-        });
-      } catch (e) {
-        console.warn('Could not index PDF in RAG:', e);
+        const chunks = profileData.chunks || [
+          { content: profileData.text_content, metadata: { source: file.originalname, page_number: 1 } }
+        ];
+
+        // Track file in uploaded_files
+        await DatabaseManager.query(
+          `INSERT INTO uploaded_files (id, user_id, project_id, original_name, file_type, file_size_bytes, status, chunk_count)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (id) DO NOTHING`,
+          [datasetId, req.user!.id, projectId, file.originalname, fileExt, file.size, 'indexing', chunks.length]
+        ).catch(() => {});
+
+        for (const chunk of chunks) {
+          await axios.post(`${config.aiServiceUrl}/api/ai/rag/index`, {
+            project_id: projectId,
+            user_id: req.user!.id,
+            file_id: datasetId,
+            content: chunk.content,
+            metadata: {
+              source: file.originalname,
+              page_number: chunk.metadata?.page_number || 1,
+              dataset_id: datasetId,
+            }
+          }, { timeout: 10000 });
+        }
+
+        await DatabaseManager.query(
+          `UPDATE uploaded_files SET status = 'ready', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+          [datasetId]
+        ).catch(() => {});
+      } catch (e: any) {
+        console.warn('Could not index document in RAG:', e.message);
+        await DatabaseManager.query(
+          `UPDATE uploaded_files SET status = 'failed', error_message = $1 WHERE id = $2`,
+          [e.message, datasetId]
+        ).catch(() => {});
       }
     }
 

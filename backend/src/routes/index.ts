@@ -45,6 +45,7 @@ router.post('/schema/generate', authenticateJWT, schemaController.generateSchema
 router.post('/schema/execute', authenticateJWT, schemaController.executeDDL);
 
 // ================= CONVERSATION ROUTES =================
+router.get('/conversations/search', authenticateJWT, conversationController.searchConversations);
 router.get('/conversations', authenticateJWT, conversationController.listConversations);
 router.post('/conversations', authenticateJWT, conversationController.createConversation);
 router.get('/conversations/:id', authenticateJWT, conversationController.getConversation);
@@ -60,6 +61,7 @@ router.get('/sql/history', authenticateJWT, sqlController.getQueryHistory);
 // ================= AI ROUTES =================
 router.post('/ai/chat', authenticateJWT, aiController.handleAIChat);
 router.post('/ai/insights', authenticateJWT, aiController.getInsights);
+router.post('/ai/index-document', authenticateJWT, aiController.indexDocument);
 
 // ================= DASHBOARD ROUTES =================
 router.get('/dashboards', authenticateJWT, dashboardController.listDashboards);

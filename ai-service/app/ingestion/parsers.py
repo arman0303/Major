@@ -1,7 +1,8 @@
 import io
 import json
 import csv
-from typing import Dict, Any, List, Tuple
+import re
+from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 from pypdf import PdfReader
 
@@ -9,6 +10,7 @@ class DataParser:
     """
     Parses and profiles JSON, CSV, and PDF datasets.
     Infers SQL column types, handles missing values, detects keys and relationships.
+    Also provides text chunking for RAG indexing.
     """
 
     @classmethod
@@ -73,13 +75,17 @@ class DataParser:
         except Exception:
             pass
 
+        # Generate chunks with page metadata for RAG
+        chunks = DataParser.chunk_pdf_pages(pages_text, filename)
+
         return {
             "file_name": filename,
             "page_count": len(reader.pages),
             "text_content": full_text,
             "pages": pages_text,
             "extracted_tables": tables_extracted,
-            "is_structured": len(tables_extracted) > 0
+            "is_structured": len(tables_extracted) > 0,
+            "chunks": chunks,
         }
 
     @classmethod
@@ -141,3 +147,95 @@ class DataParser:
             if len(sample) == 10 and sample.count("-") == 2:
                 return "DATE"
             return "VARCHAR(255)" if s_clean.astype(str).str.len().max() <= 255 else "TEXT"
+
+    @staticmethod
+    def chunk_pdf_pages(
+        pages_text: List[Dict[str, Any]],
+        source_name: str,
+        chunk_size: int = 800,
+        chunk_overlap: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        Split PDF pages into overlapping text chunks for RAG indexing.
+        Each chunk includes page number and source metadata.
+        """
+        chunks = []
+        chunk_idx = 0
+
+        for page_info in pages_text:
+            page_num = page_info["page"]
+            text = page_info["text"]
+
+            if not text.strip():
+                continue
+
+            # Split page into sub-chunks if it's long
+            if len(text) <= chunk_size:
+                chunks.append({
+                    "content": text,
+                    "metadata": {
+                        "source": source_name,
+                        "page_number": page_num,
+                        "chunk_index": chunk_idx,
+                    },
+                })
+                chunk_idx += 1
+            else:
+                start = 0
+                while start < len(text):
+                    end = min(start + chunk_size, len(text))
+                    # Try to break at sentence boundary
+                    if end < len(text):
+                        for sep in [". ", ".\n", "\n\n", "\n"]:
+                            idx = text.rfind(sep, start + chunk_size // 2, end)
+                            if idx != -1:
+                                end = idx + len(sep)
+                                break
+                    chunk_text = text[start:end].strip()
+                    if chunk_text:
+                        chunks.append({
+                            "content": chunk_text,
+                            "metadata": {
+                                "source": source_name,
+                                "page_number": page_num,
+                                "chunk_index": chunk_idx,
+                            },
+                        })
+                        chunk_idx += 1
+                    start = max(start + 1, end - chunk_overlap)
+
+        return chunks
+
+    @staticmethod
+    def chunk_text(
+        text: str,
+        source_name: str,
+        chunk_size: int = 800,
+        chunk_overlap: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Split plain text into chunks for RAG indexing."""
+        chunks = []
+        start = 0
+        chunk_idx = 0
+
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+            if end < len(text):
+                for sep in ["\n\n", "\n", ". ", " "]:
+                    idx = text.rfind(sep, start + chunk_size // 2, end)
+                    if idx != -1:
+                        end = idx + len(sep)
+                        break
+            chunk_text = text[start:end].strip()
+            if chunk_text:
+                chunks.append({
+                    "content": chunk_text,
+                    "metadata": {
+                        "source": source_name,
+                        "chunk_index": chunk_idx,
+                    },
+                })
+                chunk_idx += 1
+            start = max(start + 1, end - chunk_overlap)
+
+        return chunks

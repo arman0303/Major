@@ -43,59 +43,103 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   return data as T;
 }
 
+// ── Chat Response Type ────────────────────────────────────────────────────────
+
+export interface ChatResponse {
+  message_id: string;
+  intent: string;
+  response_type: string;
+  answer: string;
+  explanation: string;
+  generated_sql?: string | null;
+  query_type?: string | null;
+  requires_confirmation: boolean;
+  query_result?: QueryResult;
+  visualization_config?: any;
+  execution_time_ms?: number;
+  error_message?: string;
+  document_sources?: DocumentSource[];
+  ddl_statements?: string[];
+  intent_confidence?: number;
+}
+
+export interface DocumentSource {
+  id: string;
+  content: string;
+  metadata: {
+    source?: string;
+    page_number?: number;
+    chunk_index?: number;
+    file_id?: string;
+  };
+  similarity?: number;
+}
+
+// ── API Client ────────────────────────────────────────────────────────────────
+
 export const api = {
-  // Auth
+  // ── Auth ──
   register: (body: any) => request<{ user: User; token: string; refreshToken: string; defaultProjectId: string }>('/auth/register', { method: 'POST', body: JSON.stringify(body) }),
   login: (body: any) => request<{ user: User; token: string; refreshToken: string; projects: Project[] }>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
   getProfile: () => request<{ user: User; settings: UserSettings }>('/auth/profile'),
   updateSettings: (body: Partial<UserSettings>) => request<{ message: string }>('/auth/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
-  // Projects
+  // ── Projects ──
   listProjects: () => request<{ projects: Project[] }>('/projects'),
   createProject: (body: { name: string; description?: string }) => request<{ project: Project }>('/projects', { method: 'POST', body: JSON.stringify(body) }),
   getProject: (id: string) => request<{ project: Project; datasets: Dataset[] }>(`/projects/${id}`),
   updateProject: (id: string, body: { name: string; description?: string }) => request<{ message: string }>(`/projects/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteProject: (id: string) => request<{ message: string }>(`/projects/${id}`, { method: 'DELETE' }),
 
-  // Datasets
+  // ── Datasets ──
   listDatasets: (projectId: string) => request<{ datasets: Dataset[] }>(`/datasets?projectId=${projectId}`),
   uploadDataset: (formData: FormData) => request<{ dataset: Dataset }>('/datasets/upload', { method: 'POST', body: formData }),
   deleteDataset: (id: string) => request<{ message: string }>(`/datasets/${id}`, { method: 'DELETE' }),
 
-  // Schema
+  // ── Schema ──
   getSchema: (projectId: string) => request<SchemaData>(`/schema?projectId=${projectId}`),
   generateSchema: (prompt: string) => request<any>('/schema/generate', { method: 'POST', body: JSON.stringify({ prompt }) }),
   executeDDL: (ddlStatements: string[], isConfirmed: boolean) => request<any>('/schema/execute', { method: 'POST', body: JSON.stringify({ ddlStatements, isConfirmed }) }),
 
-  // Conversations
-  listConversations: (projectId: string) => request<{ conversations: Conversation[] }>(`/conversations?projectId=${projectId}`),
-  createConversation: (projectId: string, title?: string) => request<{ conversation: Conversation }>('/conversations', { method: 'POST', body: JSON.stringify({ projectId, title }) }),
-  getConversation: (id: string) => request<{ conversation: Conversation; messages: Message[] }>(`/conversations/${id}`),
-  updateConversation: (id: string, title: string) => request<{ message: string }>(`/conversations/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
-  deleteConversation: (id: string) => request<{ message: string }>(`/conversations/${id}`, { method: 'DELETE' }),
+  // ── Conversations ──
+  listConversations: (projectId: string, search?: string) => {
+    const params = new URLSearchParams({ projectId });
+    if (search) params.set('search', search);
+    return request<{ conversations: Conversation[] }>(`/conversations?${params}`);
+  },
+  searchConversations: (q: string, projectId?: string) => {
+    const params = new URLSearchParams({ q });
+    if (projectId) params.set('projectId', projectId);
+    return request<{ conversations: Conversation[] }>(`/conversations/search?${params}`);
+  },
+  createConversation: (projectId: string, title?: string) =>
+    request<{ conversation: Conversation }>('/conversations', { method: 'POST', body: JSON.stringify({ projectId, title }) }),
+  getConversation: (id: string, page?: number) => {
+    const params = new URLSearchParams();
+    if (page) params.set('page', String(page));
+    return request<{ conversation: Conversation; messages: Message[]; pagination: any }>(`/conversations/${id}?${params}`);
+  },
+  updateConversation: (id: string, title: string) =>
+    request<{ message: string; title: string }>(`/conversations/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
+  deleteConversation: (id: string) =>
+    request<{ message: string }>(`/conversations/${id}`, { method: 'DELETE' }),
 
-  // SQL Execution
+  // ── SQL Execution ──
   validateSQL: (sql: string) => request<any>('/sql/validate', { method: 'POST', body: JSON.stringify({ sql }) }),
   previewSQL: (projectId: string, sql: string) => request<any>('/sql/preview', { method: 'POST', body: JSON.stringify({ projectId, sql }) }),
-  executeSQL: (body: { projectId: string; sql: string; isConfirmed?: boolean; limit?: number }) => request<{ status: string; executed_sql: string; records: any[]; columns: string[]; row_count: number; execution_time_ms: number; query_type: string }>('/sql/execute', { method: 'POST', body: JSON.stringify(body) }),
+  executeSQL: (body: { projectId: string; sql: string; isConfirmed?: boolean; limit?: number }) =>
+    request<{ status: string; executed_sql: string; records: any[]; columns: string[]; row_count: number; execution_time_ms: number; query_type: string }>('/sql/execute', { method: 'POST', body: JSON.stringify(body) }),
   getQueryHistory: (projectId: string) => request<{ history: any[] }>(`/sql/history?projectId=${projectId}`),
 
-  // AI
-  chat: (body: { conversationId: string; projectId: string; message: string }) => request<{
-    message_id: string;
-    intent: string;
-    generated_sql: string;
-    query_type: string;
-    explanation: string;
-    requires_confirmation: boolean;
-    query_result?: QueryResult;
-    visualization_config?: any;
-    execution_time_ms?: number;
-    error_message?: string;
-  }>('/ai/chat', { method: 'POST', body: JSON.stringify(body) }),
-  getInsights: (body: { rows: any[]; columns: string[]; query?: string }) => request<any>('/ai/insights', { method: 'POST', body: JSON.stringify(body) }),
+  // ── AI ──
+  chat: (body: { conversationId: string; projectId: string; message: string }) =>
+    request<ChatResponse>('/ai/chat', { method: 'POST', body: JSON.stringify(body) }),
+  getInsights: (body: { rows: any[]; columns: string[]; query?: string }) =>
+    request<any>('/ai/insights', { method: 'POST', body: JSON.stringify(body) }),
+  indexDocument: (body: { fileId?: string; projectId: string; content?: string; chunks?: any[]; metadata?: any }) =>
+    request<{ indexed: boolean; chunks_indexed: number }>('/ai/index-document', { method: 'POST', body: JSON.stringify(body) }),
 
-  // Dashboards
+  // ── Dashboards ──
   listDashboards: (projectId: string) => request<{ dashboards: Dashboard[] }>(`/dashboards?projectId=${projectId}`),
   createDashboard: (body: { projectId: string; title: string; description?: string }) => request<{ dashboard: Dashboard }>('/dashboards', { method: 'POST', body: JSON.stringify(body) }),
   getDashboard: (id: string) => request<{ dashboard: Dashboard; widgets: DashboardWidget[] }>(`/dashboards/${id}`),

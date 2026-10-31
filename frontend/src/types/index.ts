@@ -89,13 +89,29 @@ export interface Message {
   confirmation_status?: 'none' | 'pending' | 'confirmed' | 'rejected';
   error_message?: string;
   execution_time_ms?: number;
+  intent_type?: string;
+  document_sources?: DocumentSource[];
   created_at: string;
+}
+
+export interface DocumentSource {
+  id: string;
+  content: string;
+  metadata: {
+    source?: string;
+    page_number?: number;
+    chunk_index?: number;
+    file_id?: string;
+  };
+  similarity?: number;
 }
 
 export interface Conversation {
   id: string;
   project_id: string;
+  user_id?: string;
   title: string;
+  message_count?: number;
   created_at: string;
   updated_at: string;
 }

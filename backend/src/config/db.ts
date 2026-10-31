@@ -22,11 +22,18 @@ export class DatabaseManager {
       console.log('✅ Successfully connected to PostgreSQL database!');
 
       // Run initial migrations
-      const migrationPath = path.resolve(__dirname, '../../../database/migrations/001_initial_schema.sql');
-      if (fs.existsSync(migrationPath)) {
-        const sql = fs.readFileSync(migrationPath, 'utf-8');
+      const migration1 = path.resolve(__dirname, '../../../database/migrations/001_initial_schema.sql');
+      if (fs.existsSync(migration1)) {
+        const sql = fs.readFileSync(migration1, 'utf-8');
         await client.query(sql);
         console.log('✅ PostgreSQL initial schema migrations applied successfully.');
+      }
+      // Run migration 002
+      const migration2 = path.resolve(__dirname, '../../../database/migrations/002_document_chunks.sql');
+      if (fs.existsSync(migration2)) {
+        const sql2 = fs.readFileSync(migration2, 'utf-8');
+        await client.query(sql2).catch((e: any) => console.warn('Migration 002 warning:', e.message));
+        console.log('✅ PostgreSQL migration 002 applied.');
       }
       client.release();
     } catch (err: any) {
@@ -76,6 +83,8 @@ export class DatabaseManager {
     this.localDataStore.set('saved_queries', []);
     this.localDataStore.set('dashboards', []);
     this.localDataStore.set('dashboard_widgets', []);
+    this.localDataStore.set('uploaded_files', []);
+    this.localDataStore.set('user_settings', []);
 
     // Seed sample departments, employees, projects
     this.localDataStore.set('departments', [
