@@ -5,6 +5,7 @@ from app.sql.explainer import SQLExplainer
 from app.sql.corrector import SQLCorrector
 from app.visualization.recommender import ChartRecommender
 from app.analytics.insights import AnalyticsEngine
+from app.llm.provider import LLMProvider
 
 def test_sql_validator_select():
     sql = "SELECT e.first_name, d.department_name FROM employees e JOIN departments d ON e.department_id = d.department_id WHERE e.salary > 50000;"
@@ -35,7 +36,7 @@ def test_sql_validator_blocks_dangerous_functions():
     assert "Forbidden" in result["error"]
 
 def test_text_to_sql_joins():
-    generator = SQLGenerator()
+    generator = SQLGenerator(provider=LLMProvider(provider="offline"))
     schema_context = {
         "tables": {
             "departments": [{"name": "department_id", "type": "INTEGER"}, {"name": "department_name", "type": "VARCHAR"}],
@@ -53,7 +54,7 @@ def test_text_to_sql_joins():
     assert "GROUP BY" in res["generated_sql"].upper()
 
 def test_text_to_sql_window_functions():
-    generator = SQLGenerator()
+    generator = SQLGenerator(provider=LLMProvider(provider="offline"))
     schema_context = {
         "tables": {
             "employees": [{"name": "employee_id", "type": "INTEGER"}, {"name": "salary", "type": "NUMERIC"}, {"name": "department_id", "type": "INTEGER"}]

@@ -13,9 +13,14 @@ class LLMProvider:
     """
     def __init__(self, provider: Optional[str] = None, api_key: Optional[str] = None):
         self.provider = provider or settings.DEFAULT_LLM_PROVIDER
-        self.api_key = api_key or (
-            settings.GEMINI_API_KEY if self.provider == "gemini" else settings.OPENAI_API_KEY
-        )
+        if self.provider in ("none", "offline", "mock"):
+            self.api_key = None
+        elif api_key is not None:
+            self.api_key = api_key if api_key.strip() else None
+        else:
+            self.api_key = (
+                settings.GEMINI_API_KEY if self.provider == "gemini" else settings.OPENAI_API_KEY
+            )
         self._gemini_client = None
         self._openai_client = None
         self._init_client()

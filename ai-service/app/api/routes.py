@@ -104,6 +104,16 @@ class GenerateTitleRequest(BaseModel):
     api_key: Optional[str] = None
 
 
+class SynthesizeAnswerRequest(BaseModel):
+    question: str
+    sql: str
+    rows: List[Dict[str, Any]]
+    columns: List[str]
+    row_count: int
+    provider: Optional[str] = None
+    api_key: Optional[str] = None
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/health")
@@ -199,6 +209,26 @@ Return ONLY the title, no quotes, no punctuation at the end."""
     if len(req.message) > len(title):
         title += "..."
     return {"title": title[:60]}
+
+
+@router.post("/synthesize-answer")
+def synthesize_answer(req: SynthesizeAnswerRequest):
+    """
+    Synthesize natural language answer based on actual returned rows from PostgreSQL.
+    """
+    llm = LLMProvider(provider=req.provider, api_key=req.api_key)
+    generator = ResponseGenerator(provider=llm)
+    try:
+        synth = generator.synthesize_sql_answer(
+            question=req.question,
+            sql=req.sql,
+            rows=req.rows,
+            columns=req.columns,
+            row_count=req.row_count,
+        )
+        return {"synthesized_answer": synth}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/generate-sql")

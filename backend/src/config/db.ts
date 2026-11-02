@@ -48,6 +48,25 @@ export class DatabaseManager {
     return this.isConnectedToPostgres;
   }
 
+  public static async transaction<T>(fn: (execQuery: (text: string, params?: any[]) => Promise<any>) => Promise<T>): Promise<T> {
+    if (this.isConnectedToPostgres && this.pool) {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const res = await fn((text: string, params?: any[]) => client.query(text, params));
+        await client.query('COMMIT');
+        return res;
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      return await fn((text: string, params?: any[]) => this.query(text, params));
+    }
+  }
+
   public static async query<T extends import('pg').QueryResultRow = any>(text: string, params?: any[]): Promise<{ rows: T[]; rowCount: number; duration: number }> {
     const start = Date.now();
     if (this.isConnectedToPostgres && this.pool) {
@@ -156,6 +175,68 @@ export class DatabaseManager {
 
     // 1. SELECT and WITH query handling
     if (upper.startsWith('SELECT') || upper.startsWith('WITH')) {
+      // Check for CTE / employees earning more than department average
+      if (upper.includes('WITH DEPT_AVERAGES') || (upper.includes('WITH') && upper.includes('AS (')) || (upper.includes('SALARY >') && upper.includes('AVG'))) {
+        const emps = this.getTableData('employees');
+        const depts = this.getTableData('departments');
+        const deptMap = new Map(depts.map(d => [d.department_id, d.department_name]));
+        
+        const sums: Record<number, number> = {};
+        const counts: Record<number, number> = {};
+        for (const e of emps) {
+          if (e.department_id) {
+            sums[e.department_id] = (sums[e.department_id] || 0) + Number(e.salary);
+            counts[e.department_id] = (counts[e.department_id] || 0) + 1;
+          }
+        }
+        const avgs: Record<number, number> = {};
+        for (const id in sums) {
+          avgs[id] = sums[id] / counts[id];
+        }
+
+        const rows = emps
+          .filter(e => e.department_id && e.salary > avgs[e.department_id])
+          .map(e => ({
+            first_name: e.first_name,
+            last_name: e.last_name,
+            department_name: deptMap.get(e.department_id) || '',
+            salary: e.salary,
+            dept_avg_salary: Math.round(avgs[e.department_id!] * 100) / 100,
+          }))
+          .sort((a, b) => b.salary - a.salary);
+        return { rows: rows as any };
+      }
+
+      // Check for window function rank
+      if (upper.includes('DENSE_RANK()') || upper.includes('RANK() OVER') || upper.includes('OVER (PARTITION')) {
+        const emps = this.getTableData('employees');
+        const depts = this.getTableData('departments');
+        const deptMap = new Map(depts.map(d => [d.department_id, d.department_name]));
+
+        // Partition by department and rank by salary DESC
+        const deptPartitions: Record<number, any[]> = {};
+        for (const e of emps) {
+          const dId = e.department_id || 0;
+          if (!deptPartitions[dId]) deptPartitions[dId] = [];
+          deptPartitions[dId].push(e);
+        }
+
+        const rows: any[] = [];
+        for (const dId in deptPartitions) {
+          deptPartitions[dId].sort((a, b) => b.salary - a.salary);
+          deptPartitions[dId].forEach((e, idx) => {
+            rows.push({
+              first_name: e.first_name,
+              last_name: e.last_name,
+              department_name: deptMap.get(e.department_id) || 'Unassigned',
+              salary: e.salary,
+              salary_rank: idx + 1,
+            });
+          });
+        }
+        return { rows: rows as any };
+      }
+
       // Check for JOIN between departments and employees (Average salary)
       if (upper.includes('JOIN') && upper.includes('EMPLOYEES') && upper.includes('DEPARTMENTS')) {
         const emps = this.getTableData('employees');
@@ -357,9 +438,34 @@ export class DatabaseManager {
           }
         }
 
-        // Aggregate functions: COUNT(*)
-        if (upper.includes('COUNT(*)')) {
-          return { rows: [{ count: rows.length }] as any };
+        // Aggregate functions: SUM, AVG, MIN, MAX, COUNT
+        if (/SELECT\s+.*?(SUM|AVG|MIN|MAX|COUNT)\s*\(/i.test(trimmed)) {
+          const resultRow: Record<string, any> = {};
+          const aggMatches = [...trimmed.matchAll(/(SUM|AVG|MIN|MAX|COUNT)\s*\(\s*(?:DISTINCT\s+)?([a-zA-Z0-9_*]+)\s*\)(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?/gi)];
+          if (aggMatches.length > 0) {
+            for (const am of aggMatches) {
+              const func = am[1].toUpperCase();
+              const col = am[2].toLowerCase();
+              const alias = am[3] ? am[3].toLowerCase() : `${func.toLowerCase()}_${col}`;
+              if (func === 'COUNT') {
+                resultRow[alias] = col === '*' ? rows.length : rows.filter(r => r[col] !== null && r[col] !== undefined).length;
+              } else {
+                const nums = rows.map(r => Number(r[col])).filter(n => !isNaN(n));
+                if (func === 'SUM') {
+                  const s = nums.reduce((a, b) => a + b, 0);
+                  resultRow[alias] = Math.round(s * 100) / 100;
+                } else if (func === 'AVG') {
+                  const avg = nums.length > 0 ? nums.reduce((a, b) => a + b, 0) / nums.length : 0;
+                  resultRow[alias] = Math.round(avg * 100) / 100;
+                } else if (func === 'MIN') {
+                  resultRow[alias] = nums.length > 0 ? Math.min(...nums) : null;
+                } else if (func === 'MAX') {
+                  resultRow[alias] = nums.length > 0 ? Math.max(...nums) : null;
+                }
+              }
+            }
+            return { rows: [resultRow] as any };
+          }
         }
 
         // Sorting

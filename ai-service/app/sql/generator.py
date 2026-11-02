@@ -126,12 +126,10 @@ Return a JSON object with:
                 res["validation_error"] = validation.get("error")
             return res
         except Exception as e:
-            # Fallback to deterministic generator if LLM call fails
-            return self._generate_deterministic(
-                question=question,
-                tables_meta=schema_context.get("tables", {}),
-                relationships=schema_context.get("relationships", []),
-                previous_sql=previous_sql
+            # Do NOT silently fall back to hardcoded queries on unrelated tables
+            raise RuntimeError(
+                f"LLM SQL Generation failed: {str(e)}. "
+                "Unable to dynamically generate SQL. Please verify your LLM API key and configuration."
             )
 
     def _generate_deterministic(
@@ -142,17 +140,25 @@ Return a JSON object with:
         previous_sql: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Deterministic, schema-aware SQL generator that handles complex joins,
-        aggregations, CTEs, window functions, and follow-ups.
+        Deterministic, schema-aware SQL generator that operates strictly
+        against tables that actually exist in the project schema.
+        Never hallucinates non-existent tables or returns employee queries
+        for custom uploaded datasets.
         """
         q = question.lower().strip()
         available_tables = list(tables_meta.keys())
+
+        if not available_tables:
+            raise ValueError(
+                "No database tables were found for this project. "
+                "Please upload a dataset or configure project tables before generating SQL queries."
+            )
         
         # 1. Follow-up rewriting if previous query exists
         if previous_sql and ("only" in q or "sort" in q or "top" in q or "order by" in q or "them" in q or "where" in q or "filter" in q):
             return self._handle_followup(q, previous_sql, tables_meta)
 
-        # 2. Match relevant tables from question
+        # 2. Match relevant tables strictly from available schema
         target_tables = []
         for t in available_tables:
             t_clean = t.lower().replace("_", " ")
@@ -160,14 +166,14 @@ Return a JSON object with:
                 target_tables.append(t)
 
         if not target_tables:
-            target_tables = available_tables[:1] if available_tables else ["employees"]
+            target_tables = [available_tables[0]]
 
         primary_table = target_tables[0]
         cols_info = tables_meta.get(primary_table, [])
         col_names = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in cols_info]
 
-        # 3. Department / Employee JOIN scenarios
-        if "department" in q and ("employee" in q or "salary" in q):
+        # 3. Department / Employee JOIN scenarios (ONLY if both tables exist)
+        if "departments" in available_tables and "employees" in available_tables and "department" in q and ("employee" in q or "salary" in q):
             # Check for join between employees and departments
             if "average salary" in q or "avg salary" in q or "highest average" in q or "highest-paid department" in q:
                 sql = (
@@ -508,25 +514,34 @@ Return a JSON object with:
         intent = "Apply filter/sorting to previous query"
         explanation = "Refined previous query based on conversational context."
 
+        table_match = re.search(r'\bFROM\s+["\']?([a-zA-Z0-9_]+)["\']?', sql, re.IGNORECASE)
+        primary_table = table_match.group(1).lower() if table_match else (list(tables_meta.keys())[0] if tables_meta else "employees")
+        table_cols = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in tables_meta.get(primary_table, [])]
+
+        # Determine best sort column
+        sort_col = "salary"
+        for candidate in ["salary", "total_amount", "revenue", "amount", "budget", "price", "count", "id"]:
+            if candidate in table_cols:
+                sort_col = candidate
+                break
+
         if "only" in q or "from it" in q or "it department" in q:
-            # Add department filter
+            filter_clause = "department_id = 1" if "department_id" in table_cols else f"{table_cols[0]} IS NOT NULL"
             if "WHERE" in sql.upper():
-                sql = f"{sql} AND department_id = 1"
+                sql = f"{sql} AND {filter_clause}"
             else:
-                # If there is ORDER BY or LIMIT, inject before
                 parts = re.split(r'\b(ORDER BY|LIMIT)\b', sql, flags=re.IGNORECASE)
                 base = parts[0]
                 rest = "".join(parts[1:])
-                sql = f"{base} WHERE department_id = 1 {rest}"
-            intent = "Filter results to only include employees in the IT/Engineering department"
-            explanation = "Appended WHERE department_id = 1 to the previous query."
+                sql = f"{base} WHERE {filter_clause} {rest}"
+            intent = f"Filter results on {primary_table}"
+            explanation = f"Appended WHERE {filter_clause} to the previous query."
 
-        if "sort" in q or "by salary" in q:
-            # Replace or add ORDER BY
+        if "sort" in q or "by salary" in q or "order by" in q:
             sql = re.sub(r'ORDER BY.*?(?=LIMIT|$)', '', sql, flags=re.IGNORECASE).strip()
-            sql = f"{sql} ORDER BY salary DESC"
-            intent = "Sort the records by salary in descending order"
-            explanation = "Added ORDER BY salary DESC."
+            sql = f"{sql} ORDER BY {sort_col} DESC"
+            intent = f"Sort the records by {sort_col} in descending order"
+            explanation = f"Added ORDER BY {sort_col} DESC."
 
         if "top" in q:
             match = re.search(r'top\s+(\d+|five|ten|three)', q)
@@ -535,10 +550,9 @@ Return a JSON object with:
                 word = match.group(1).lower()
                 num_map = {"five": "5", "ten": "10", "three": "3", "one": "1"}
                 num = num_map.get(word, word)
-            # Remove existing limit and add new limit
             sql = re.sub(r'LIMIT\s+\d+', '', sql, flags=re.IGNORECASE).strip()
             if "ORDER BY" not in sql.upper():
-                sql = f"{sql} ORDER BY salary DESC"
+                sql = f"{sql} ORDER BY {sort_col} DESC"
             sql = f"{sql} LIMIT {num}"
             intent = f"Limit the results to the top {num} records"
             explanation = f"Appended LIMIT {num}."
@@ -548,14 +562,14 @@ Return a JSON object with:
             "intent": intent,
             "generated_sql": sql,
             "query_type": "SELECT",
-            "relevant_tables": ["employees"],
-            "relevant_columns": ["salary", "department_id"],
+            "relevant_tables": [primary_table],
+            "relevant_columns": [sort_col],
             "explanation": explanation,
             "visualization_recommendation": {
                 "chart_type": "bar",
-                "x_axis": "first_name",
-                "y_axis": "salary",
-                "title": "Refined Query Results"
+                "x_axis": table_cols[0] if table_cols else "id",
+                "y_axis": sort_col,
+                "title": f"Refined Query Results on {primary_table.capitalize()}"
             },
             "requires_confirmation": False,
             "validation": SQLValidator.validate_query(sql)

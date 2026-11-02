@@ -176,10 +176,11 @@ class RAGRetriever:
                 import psycopg2
                 conn = psycopg2.connect(settings.DATABASE_URL, connect_timeout=3)
                 with conn.cursor() as cur:
+                    vec_str = f"[{','.join(str(round(x, 6)) for x in embedding)}]"
                     cur.execute("""
                         INSERT INTO document_chunks 
-                        (file_id, user_id, project_id, conversation_id, chunk_index, content, page_number, section, metadata)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (file_id, user_id, project_id, conversation_id, chunk_index, content, page_number, section, metadata, embedding)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
                     """, (
                         f_id,
                         user_id or "default_user",
@@ -189,7 +190,8 @@ class RAGRetriever:
                         cleaned,
                         page_num,
                         section,
-                        json.dumps(metadata)
+                        json.dumps(metadata),
+                        vec_str
                     ))
                 conn.commit()
                 conn.close()

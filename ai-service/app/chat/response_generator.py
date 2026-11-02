@@ -324,6 +324,74 @@ Ask a single, helpful clarification question."""
             "ambiguous"
         )
 
+    def synthesize_sql_answer(
+        self,
+        question: str,
+        sql: str,
+        rows: List[Dict[str, Any]],
+        columns: List[str],
+        row_count: int,
+    ) -> str:
+        """
+        Synthesizes a fact-based natural language answer grounded strictly
+        in the actual returned query rows.
+        """
+        if row_count == 0 or not rows:
+            return "The query was executed successfully against your database, but returned 0 records matching your criteria."
+
+        # If LLM key is available, generate grounded factual synthesis
+        if self.provider.has_active_api_key():
+            prompt = f"""You are DataPilot, a senior data analyst.
+A user asked this question:
+"{question}"
+
+The following SQL query was executed:
+```sql
+{sql}
+```
+
+Database Result Summary:
+Total Rows Returned: {row_count}
+Columns: {', '.join(columns)}
+First Rows (up to 25):
+{rows[:25]}
+
+Task:
+Write a clear, concise, and fact-based summary answer for the user based strictly on the actual returned data rows above.
+Rules:
+1. Ground your answer completely in the returned data. Never invent or assume numbers that are not in the rows.
+2. If the query computed an aggregation (SUM, AVG, MIN, MAX, COUNT), clearly state the exact calculated number.
+3. If the query ranked or listed entities, identify the key entities and their exact values.
+4. Do NOT explain SQL syntax or state "This query selects...". Answer the user's business question directly.
+5. Keep your tone professional, crisp, and informative.
+"""
+            try:
+                synth = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.1)
+                if synth and synth.strip():
+                    return synth.strip()
+            except Exception:
+                pass
+
+        # Deterministic intelligent fallback when offline
+        if row_count == 1:
+            row = rows[0]
+            summary_parts = [f"**{k}**: {v}" for k, v in row.items()]
+            return f"Query returned 1 record: {', '.join(summary_parts)}."
+        elif row_count > 1:
+            first_col = columns[0] if columns else "record"
+            second_col = columns[1] if len(columns) > 1 else None
+            samples = []
+            for r in rows[:3]:
+                if second_col and second_col in r:
+                    samples.append(f"{r.get(first_col)} ({r.get(second_col)})")
+                else:
+                    samples.append(str(r.get(first_col)))
+            sample_str = ", ".join(samples)
+            more_str = f" and {row_count - len(samples)} more" if row_count > len(samples) else ""
+            return f"Found {row_count} records. Top entries: {sample_str}{more_str}."
+
+        return f"Query executed successfully, returning {row_count} records."
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _fallback_conceptual(self, message: str) -> Dict[str, Any]:

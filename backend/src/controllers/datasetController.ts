@@ -18,7 +18,16 @@ function parseCSVLocally(filePath: string): Promise<{ columns: any[]; rows: any[
         const cleanRow: Record<string, any> = {};
         for (const [k, v] of Object.entries(data)) {
           const cleanKey = k.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-          cleanRow[cleanKey] = v;
+          let val: any = v;
+          if (typeof val === 'string') {
+            const trimmed = val.trim();
+            if (trimmed === '' || trimmed.toLowerCase() === 'null' || trimmed.toLowerCase() === 'undefined' || trimmed.toLowerCase() === 'none') {
+              val = null;
+            } else {
+              val = trimmed;
+            }
+          }
+          cleanRow[cleanKey] = val;
         }
         rows.push(cleanRow);
       })
@@ -29,17 +38,30 @@ function parseCSVLocally(filePath: string): Promise<{ columns: any[]; rows: any[
         const first = rows[0];
         const columns = Object.keys(first).map(col => {
           let isNum = true;
+          let isInt = true;
           let isDate = true;
-          for (const r of rows.slice(0, 20)) {
+          let isBool = true;
+          let nonNullCount = 0;
+
+          for (const r of rows.slice(0, 50)) {
             const v = r[col];
-            if (v !== '' && v !== null && v !== undefined) {
+            if (v !== null && v !== undefined) {
+              nonNullCount++;
+              const strV = String(v);
               if (isNaN(Number(v))) isNum = false;
-              if (isNaN(Date.parse(v))) isDate = false;
+              if (!Number.isInteger(Number(v))) isInt = false;
+              if (isNaN(Date.parse(strV)) || !strV.includes('-') && !strV.includes('/')) isDate = false;
+              if (strV.toLowerCase() !== 'true' && strV.toLowerCase() !== 'false') isBool = false;
             }
           }
+
           let type = 'VARCHAR(255)';
-          if (isNum) type = 'NUMERIC(14,2)';
-          else if (isDate) type = 'DATE';
+          if (nonNullCount > 0) {
+            if (isBool) type = 'BOOLEAN';
+            else if (isNum) type = isInt ? 'BIGINT' : 'NUMERIC(14,2)';
+            else if (isDate) type = 'TIMESTAMP';
+          }
+
           return {
             name: col,
             type,
@@ -47,11 +69,32 @@ function parseCSVLocally(filePath: string): Promise<{ columns: any[]; rows: any[
             nullable: true,
           };
         });
+
+        // Cast rows according to inferred types
+        const typedRows = rows.map(r => {
+          const newR: Record<string, any> = {};
+          for (const c of columns) {
+            const raw = r[c.name];
+            if (raw === null || raw === undefined) {
+              newR[c.name] = null;
+            } else if (c.type === 'BIGINT') {
+              newR[c.name] = parseInt(raw, 10);
+            } else if (c.type === 'NUMERIC(14,2)') {
+              newR[c.name] = parseFloat(raw);
+            } else if (c.type === 'BOOLEAN') {
+              newR[c.name] = String(raw).toLowerCase() === 'true';
+            } else {
+              newR[c.name] = raw;
+            }
+          }
+          return newR;
+        });
+
         resolve({
           columns,
-          rows,
-          rowCount: rows.length,
-          preview: rows.slice(0, 10),
+          rows: typedRows,
+          rowCount: typedRows.length,
+          preview: typedRows.slice(0, 10),
         });
       })
       .on('error', reject);
@@ -73,7 +116,8 @@ function parseJSONLocally(filePath: string): { columns: any[]; rows: any[]; rowC
   const rows = rawRows.map(r => {
     const clean: Record<string, any> = {};
     for (const [k, v] of Object.entries(r)) {
-      clean[k.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_')] = v;
+      const cleanKey = k.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
+      clean[cleanKey] = v === '' ? null : v;
     }
     return clean;
   });
@@ -81,7 +125,9 @@ function parseJSONLocally(filePath: string): { columns: any[]; rows: any[]; rowC
   const first = rows[0] || {};
   const columns = Object.keys(first).map(k => ({
     name: k,
-    type: typeof first[k] === 'number' ? 'NUMERIC(14,2)' : typeof first[k] === 'boolean' ? 'BOOLEAN' : 'VARCHAR(255)',
+    type: typeof first[k] === 'number'
+      ? Number.isInteger(first[k]) ? 'BIGINT' : 'NUMERIC(14,2)'
+      : typeof first[k] === 'boolean' ? 'BOOLEAN' : 'VARCHAR(255)',
     is_primary_key: k.endsWith('_id') || k === 'id',
     nullable: true,
   }));
@@ -123,10 +169,24 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
     return;
   }
 
-  const safeTableName = (tableName || file.originalname.split('.')[0])
+  let baseTableName = (tableName || file.originalname.split('.')[0])
     .toLowerCase()
     .replace(/[^a-z0-9_]/g, '_')
     .replace(/^[^a-z_]+/, 'tbl_');
+
+  // Prevent cross-project table collisions: check if table_name is already owned by another project
+  let safeTableName = baseTableName;
+  try {
+    const existingTableCheck = await DatabaseManager.query(
+      `SELECT project_id FROM datasets WHERE table_name = $1 AND project_id != $2 LIMIT 1`,
+      [baseTableName, projectId]
+    );
+    if (existingTableCheck.rows.length > 0) {
+      // Append project-specific short hash to isolate table namespace
+      const pHash = projectId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
+      safeTableName = `${baseTableName}_p${pHash}`;
+    }
+  } catch { /* proceed with baseTableName */ }
 
   const fileExt = file.originalname.split('.').pop()?.toLowerCase() || 'csv';
 
@@ -174,42 +234,74 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
     const rowCount = parsedRows.length || profileData?.row_count || 0;
     const columns = profileData?.columns || [];
 
-    // 3. Persist Structured Tables (CSV & JSON) into Real Database & Local Store
+    // 3. Persist Structured Tables (CSV & JSON) using transactional multi-row batch insert
     if (fileExt === 'csv' || fileExt === 'json') {
-      // Always store in DatabaseManager local store so all SELECT * FROM safeTableName succeed immediately
+      // Always store in DatabaseManager local store for immediate local simulation
       if (parsedRows.length > 0) {
         DatabaseManager.setTableData(safeTableName, parsedRows);
       }
 
-      // If PostgreSQL is connected, dynamically create the table and insert records
+      // If PostgreSQL is connected, dynamically create table and batch-insert EVERY row
       if (DatabaseManager.isPostgres() && columns.length > 0) {
-        try {
+        await DatabaseManager.transaction(async (execQuery) => {
+          // Replace policy: drop existing table for this project if re-uploading
+          await execQuery(`DROP TABLE IF EXISTS "${safeTableName}" CASCADE;`);
+
           const colDefs = columns.map((c: any) => `"${c.name}" ${c.type || 'VARCHAR(255)'}`).join(', ');
-          await DatabaseManager.query(`CREATE TABLE IF NOT EXISTS "${safeTableName}" (${colDefs});`);
+          await execQuery(`CREATE TABLE "${safeTableName}" (${colDefs});`);
 
-          // Batch insert up to 1000 rows
-          const rowsToInsert = parsedRows.slice(0, 1000);
-          for (const row of rowsToInsert) {
+          // Batch insert in chunks of 100 rows to optimize throughput and stay within bind parameters
+          const BATCH_SIZE = 100;
+          for (let i = 0; i < parsedRows.length; i += BATCH_SIZE) {
+            const batch = parsedRows.slice(i, i + BATCH_SIZE);
+            const valueClauses: string[] = [];
+            const flatValues: any[] = [];
+
+            batch.forEach((row, rowIdx) => {
+              const rowPlaceholders: string[] = [];
+              columns.forEach((c: any, colIdx: number) => {
+                const paramIdx = rowIdx * columns.length + colIdx + 1;
+                rowPlaceholders.push(`$${paramIdx}`);
+                const val = row[c.name];
+                flatValues.push(val === undefined || val === '' ? null : val);
+              });
+              valueClauses.push(`(${rowPlaceholders.join(', ')})`);
+            });
+
             const colNames = columns.map((c: any) => `"${c.name}"`).join(', ');
-            const placeholders = columns.map((_: any, idx: number) => `$${idx + 1}`).join(', ');
-            const vals = columns.map((c: any) => row[c.name] ?? null);
-            await DatabaseManager.query(
-              `INSERT INTO "${safeTableName}" (${colNames}) VALUES (${placeholders})`,
-              vals
-            ).catch(() => {});
+            const insertSql = `INSERT INTO "${safeTableName}" (${colNames}) VALUES ${valueClauses.join(', ')}`;
+            await execQuery(insertSql, flatValues);
           }
-        } catch (dbErr: any) {
-          console.warn(`PostgreSQL table creation notice for ${safeTableName}:`, dbErr.message);
-        }
-      }
 
-      // Register columns in schema_metadata for conversational schema discovery
-      for (const col of columns) {
-        await DatabaseManager.query(
-          `INSERT INTO schema_metadata (project_id, table_name, column_name, data_type, is_nullable, is_primary_key)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [projectId, safeTableName, col.name, col.type, col.nullable ?? true, col.is_primary_key ?? false]
-        ).catch(() => {});
+          // Verify inserted row count
+          const countRes = await execQuery(`SELECT COUNT(*) AS count FROM "${safeTableName}"`);
+          const actualInserted = parseInt(countRes.rows[0]?.count || '0', 10);
+          if (actualInserted !== parsedRows.length) {
+            throw new Error(`Row count mismatch: expected ${parsedRows.length} rows, but database has ${actualInserted}`);
+          }
+
+          // Refresh schema_metadata for project
+          await execQuery(`DELETE FROM schema_metadata WHERE project_id = $1 AND table_name = $2`, [projectId, safeTableName]);
+          for (const col of columns) {
+            await execQuery(
+              `INSERT INTO schema_metadata (project_id, table_name, column_name, data_type, is_nullable, is_primary_key)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [projectId, safeTableName, col.name, col.type, col.nullable ?? true, col.is_primary_key ?? false]
+            );
+          }
+        });
+      } else {
+        // Fallback store metadata refresh
+        try {
+          await DatabaseManager.query(`DELETE FROM schema_metadata WHERE project_id = $1 AND table_name = $2`, [projectId, safeTableName]);
+          for (const col of columns) {
+            await DatabaseManager.query(
+              `INSERT INTO schema_metadata (project_id, table_name, column_name, data_type, is_nullable, is_primary_key)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [projectId, safeTableName, col.name, col.type, col.nullable ?? true, col.is_primary_key ?? false]
+            );
+          }
+        } catch { /* local store */ }
       }
     }
 

@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import { AuthenticatedRequest } from '../middleware/auth.js';
 import { DatabaseManager } from '../config/db.js';
+import { SchemaService, ProjectSchemaContext } from '../services/schemaService.js';
 import axios from 'axios';
 import { config } from '../config/index.js';
 
@@ -21,35 +22,8 @@ async function getUserAIConfig(userId: string) {
   }
 }
 
-async function getSchemaContext(projectId: string): Promise<Record<string, any[]>> {
-  const tablesMeta: Record<string, any[]> = {};
-
-  try {
-    const schemaRes = await DatabaseManager.query(
-      `SELECT table_name, column_name, data_type FROM schema_metadata WHERE project_id = $1`,
-      [projectId]
-    );
-    for (const row of schemaRes.rows) {
-      if (!tablesMeta[row.table_name]) tablesMeta[row.table_name] = [];
-      tablesMeta[row.table_name].push({ name: row.column_name, type: row.data_type });
-    }
-  } catch { /* schema_metadata table may not exist in fallback mode */ }
-
-  // Always supplement with local sample tables
-  const defaultTables = DatabaseManager.getAllTables();
-  for (const t of defaultTables) {
-    if (!tablesMeta[t]) {
-      const data = DatabaseManager.getTableData(t);
-      if (data.length > 0) {
-        tablesMeta[t] = Object.keys(data[0]).map(k => ({
-          name: k,
-          type: typeof data[0][k] === 'number' ? 'NUMERIC' : 'VARCHAR',
-        }));
-      }
-    }
-  }
-
-  return tablesMeta;
+async function getSchemaContext(projectId: string): Promise<ProjectSchemaContext> {
+  return await SchemaService.getProjectSchema(projectId);
 }
 
 async function getConversationHistory(conversationId: string, limit = 10): Promise<Array<{ role: string; content: string }>> {
@@ -181,7 +155,11 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
     let aiResponse: any;
     const aiPayload = {
       message,
-      schema_context: { tables: schemaContext },
+      schema_context: {
+        tables: schemaContext.tables,
+        relationships: schemaContext.relationships,
+        row_counts: schemaContext.table_row_counts,
+      },
       conversation_history: conversationHistory,
       previous_sql: previousSql,
       project_id: projectId,
@@ -223,8 +201,9 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
     let executionDuration = 0;
     let vizConfig: any = aiResponse.visualization_recommendation || null;
     let executionError: string | null = null;
+    let answerText = aiResponse.answer || aiResponse.explanation || `Processed ${intent} request.`;
 
-    // 7. Security Validation and Automated Execution for Safe SELECT Queries
+    // 7. Security Validation, Schema Verification, and Automated Execution for Safe SELECT Queries
     if (!requiresConfirmation && queryType === 'SELECT' && generatedSql) {
       // Security Check A: Reject multi-statement queries
       const statements = generatedSql.split(';').map((s: string) => s.trim()).filter(Boolean);
@@ -238,7 +217,15 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
         executionError = 'Security Violation: Execution of privileged administrative SQL commands is strictly blocked.';
       }
 
-      // Only execute if all security validations pass
+      // Schema Check C: Verify referenced tables exist in project schema
+      if (!executionError) {
+        const schemaCheck = SchemaService.verifySQLAgainstSchema(generatedSql, schemaContext);
+        if (!schemaCheck.valid) {
+          executionError = `Schema Validation Error: Query references non-existent table(s): ${schemaCheck.missingTables.join(', ')}.`;
+        }
+      }
+
+      // Only execute if all validations pass
       if (!executionError) {
         const startExec = Date.now();
         try {
@@ -251,6 +238,24 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
             columns,
             row_count: dbRes.rowCount,
           };
+
+          // Post-Execution Answer Synthesis: Ground answer in real returned rows
+          try {
+            const synthRes = await axios.post(`${config.aiServiceUrl}/api/ai/synthesize-answer`, {
+              question: message,
+              sql: generatedSql,
+              rows: dbRes.rows.slice(0, 30),
+              columns,
+              row_count: dbRes.rowCount,
+              provider,
+              api_key: apiKey,
+            }, { timeout: 12000 });
+            if (synthRes.data?.synthesized_answer) {
+              answerText = synthRes.data.synthesized_answer;
+            }
+          } catch (synthErr: any) {
+            console.warn('Answer synthesis notice:', synthErr.message);
+          }
 
           // Get chart recommendation if not provided
           if (!vizConfig && dbRes.rows.length > 0) {
@@ -273,19 +278,41 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
               const correctRes = await axios.post(`${config.aiServiceUrl}/api/ai/correct-sql`, {
                 failed_sql: generatedSql,
                 error_message: execErr.message,
-                schema_context: { tables: schemaContext },
+                schema_context: { tables: schemaContext.tables },
                 provider,
                 api_key: apiKey,
               }, { timeout: 10000 });
               if (correctRes.data?.corrected_sql) {
-                const fixedRes = await DatabaseManager.query(correctRes.data.corrected_sql);
-                queryResult = {
-                  records: fixedRes.rows,
-                  columns: fixedRes.rows.length > 0 ? Object.keys(fixedRes.rows[0]) : [],
-                  row_count: fixedRes.rowCount,
-                };
-                aiResponse.generated_sql = correctRes.data.corrected_sql;
-                executionError = null;
+                const correctedSql = correctRes.data.corrected_sql;
+                // Re-verify corrected query against schema and security checks
+                const correctedCheck = SchemaService.verifySQLAgainstSchema(correctedSql, schemaContext);
+                if (correctedCheck.valid) {
+                  const fixedRes = await DatabaseManager.query(correctedSql);
+                  const fixedColumns = fixedRes.rows.length > 0 ? Object.keys(fixedRes.rows[0]) : [];
+                  queryResult = {
+                    records: fixedRes.rows,
+                    columns: fixedColumns,
+                    row_count: fixedRes.rowCount,
+                  };
+                  aiResponse.generated_sql = correctedSql;
+                  executionError = null;
+
+                  // Post-execution synthesis on corrected query result
+                  try {
+                    const synthRes = await axios.post(`${config.aiServiceUrl}/api/ai/synthesize-answer`, {
+                      question: message,
+                      sql: correctedSql,
+                      rows: fixedRes.rows.slice(0, 30),
+                      columns: fixedColumns,
+                      row_count: fixedRes.rowCount,
+                      provider,
+                      api_key: apiKey,
+                    }, { timeout: 12000 });
+                    if (synthRes.data?.synthesized_answer) {
+                      answerText = synthRes.data.synthesized_answer;
+                    }
+                  } catch {}
+                }
               }
             } catch { /* auto-correct failed */ }
           }
@@ -293,8 +320,9 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
       }
     }
 
-    // 8. Build answer text
-    const answerText = aiResponse.answer || aiResponse.explanation || `Processed ${intent} request.`;
+    if (executionError) {
+      answerText = `Execution notice: ${executionError}`;
+    }
 
     // 9. Save assistant message
     const assistantMsgId = `msg_ast_${Date.now()}_${Math.random().toString(36).slice(2, 5)}`;

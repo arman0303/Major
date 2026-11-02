@@ -31,15 +31,24 @@ class EmbeddingService:
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=api_key)
-                res = genai.embed_content(
-                    model=settings.GEMINI_EMBEDDING_MODEL,
-                    content=text,
-                    task_type="retrieval_document"
-                )
+                try:
+                    res = genai.embed_content(
+                        model=settings.GEMINI_EMBEDDING_MODEL,
+                        content=text,
+                        task_type="retrieval_document",
+                        output_dimensionality=self.dimension
+                    )
+                except Exception:
+                    # Fallback for models or API versions where output_dimensionality is not recognized
+                    res = genai.embed_content(
+                        model=settings.GEMINI_EMBEDDING_MODEL,
+                        content=text,
+                        task_type="retrieval_document"
+                    )
                 embedding = res.get("embedding")
                 if not embedding:
                     raise RuntimeError("Gemini embed_content returned an empty embedding vector.")
-                # Truncate or pad to self.dimension (768) and normalize
+                # Ensure vector is normalized to self.dimension (768)
                 return self._normalize(embedding[:self.dimension])
             except Exception as e:
                 raise RuntimeError(f"Gemini embedding generation failed: {str(e)}")
