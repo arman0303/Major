@@ -321,8 +321,8 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
       ]
     );
 
-    // 5. Index Document Chunks for PDF & TXT into RAG Store
-    if (fileExt === 'pdf' || fileExt === 'txt') {
+    // 5. Index Document Chunks for PDF, DOCX & TXT into RAG Store
+    if (fileExt === 'pdf' || fileExt === 'txt' || fileExt === 'docx') {
       let chunks: any[] = [];
       if (profileData?.chunks && profileData.chunks.length > 0) {
         chunks = profileData.chunks;
@@ -353,23 +353,31 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
         [datasetId, req.user?.id || 'default_user', projectId, file.originalname, fileExt, file.size, 'ready', chunks.length]
       ).catch(() => {});
 
-      // Index chunks into RAG store
-      for (const chunk of chunks) {
-        try {
-          await axios.post(`${config.aiServiceUrl}/api/ai/rag/index`, {
-            project_id: projectId,
-            user_id: req.user?.id || 'default_user',
-            file_id: datasetId,
-            content: chunk.content,
-            metadata: {
-              source: file.originalname,
-              page_number: chunk.metadata?.page_number || 1,
-              dataset_id: datasetId,
-            }
-          }, { timeout: 10000 });
-        } catch (ragErr: any) {
-          console.warn('RAG indexing chunk notice:', ragErr.message);
-        }
+      // Index chunks into RAG store in batches of 5 concurrent requests to prevent timeouts
+      const BATCH_CONCURRENCY = 5;
+      for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
+        const batch = chunks.slice(i, i + BATCH_CONCURRENCY);
+        await Promise.allSettled(
+          batch.map(chunk =>
+            axios.post(
+              `${config.aiServiceUrl}/api/ai/rag/index`,
+              {
+                project_id: projectId,
+                user_id: req.user?.id || 'default_user',
+                file_id: datasetId,
+                content: chunk.content,
+                metadata: {
+                  source: file.originalname,
+                  page_number: chunk.metadata?.page_number || 1,
+                  dataset_id: datasetId,
+                },
+              },
+              { timeout: 8000 }
+            ).catch(ragErr => {
+              console.warn('RAG indexing chunk notice:', ragErr.message);
+            })
+          )
+        );
       }
     }
 

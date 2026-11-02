@@ -237,7 +237,9 @@ Return a JSON object with:
                     }
 
         # 4. Multi-table JOIN (Employees + Projects + Employee_Projects)
-        if ("project" in q and "employee" in q) or "multiple projects" in q:
+        # Only execute if required tables are actually in the project schema
+        _has_emp_proj = "employee_projects" in available_tables and "employees" in available_tables
+        if _has_emp_proj and (("project" in q and "employee" in q) or "multiple projects" in q):
             if "multiple project" in q or "more than one project" in q or "working on multiple" in q:
                 sql = (
                     "SELECT e.employee_id, e.first_name, e.last_name, e.role, COUNT(ep.project_id) AS project_count\n"
@@ -284,24 +286,37 @@ Return a JSON object with:
                 }
 
         # 5. Window functions & Ranking (e.g. rank employees by salary within each department)
-        if "rank" in q or "ranking" in q or ("salary within" in q and "department" in q):
-            sql = (
-                "SELECT e.first_name, e.last_name, d.department_name, e.salary,\n"
-                "       DENSE_RANK() OVER (PARTITION BY e.department_id ORDER BY e.salary DESC) AS salary_rank\n"
-                "FROM employees e\n"
-                "JOIN departments d ON e.department_id = d.department_id\n"
-                "ORDER BY d.department_name, salary_rank;"
-            )
+        if "employees" in available_tables and ("rank" in q or "ranking" in q or ("salary within" in q and "department" in q)):
+            if "departments" in available_tables:
+                sql = (
+                    "SELECT e.first_name, e.last_name, d.department_name, e.salary,\n"
+                    "       DENSE_RANK() OVER (PARTITION BY e.department_id ORDER BY e.salary DESC) AS salary_rank\n"
+                    "FROM employees e\n"
+                    "JOIN departments d ON e.department_id = d.department_id\n"
+                    "ORDER BY d.department_name, salary_rank;"
+                )
+                rel_tables = ["employees", "departments"]
+                rel_cols = ["first_name", "last_name", "department_name", "salary"]
+            else:
+                sql = (
+                    "SELECT e.employee_id, e.salary, e.department_id,\n"
+                    "       DENSE_RANK() OVER (PARTITION BY e.department_id ORDER BY e.salary DESC) AS salary_rank\n"
+                    "FROM employees e\n"
+                    "ORDER BY e.department_id, salary_rank;"
+                )
+                rel_tables = ["employees"]
+                rel_cols = ["employee_id", "salary", "department_id"]
+
             return {
                 "intent": "Rank employees by salary within each department using window functions",
                 "generated_sql": sql,
                 "query_type": "SELECT",
-                "relevant_tables": ["employees", "departments"],
-                "relevant_columns": ["first_name", "last_name", "department_name", "salary"],
+                "relevant_tables": rel_tables,
+                "relevant_columns": rel_cols,
                 "explanation": "Uses the DENSE_RANK() window function partitioned by department_id and ordered by salary DESC.",
                 "visualization_recommendation": {
                     "chart_type": "bar",
-                    "x_axis": "first_name",
+                    "x_axis": "first_name" if "departments" in available_tables else "employee_id",
                     "y_axis": "salary",
                     "title": "Employee Salary Ranking by Department"
                 },
@@ -310,7 +325,8 @@ Return a JSON object with:
             }
 
         # 6. CTE and Correlated Subquery (Employees earning more than department average)
-        if "more than" in q and ("department's average" in q or "department average" in q):
+        # Only execute if employees and departments tables exist
+        if "employees" in available_tables and "departments" in available_tables and ("more than" in q and ("department's average" in q or "department average" in q)):
             sql = (
                 "WITH dept_averages AS (\n"
                 "    SELECT department_id, AVG(salary) AS avg_salary\n"
@@ -343,7 +359,8 @@ Return a JSON object with:
             }
 
         # 7. Second highest salary / Nth highest
-        if "second-highest" in q or "second highest" in q or "2nd highest" in q:
+        # Only execute if employees table exists in this project
+        if "employees" in available_tables and ("second-highest" in q or "second highest" in q or "2nd highest" in q):
             sql = (
                 "SELECT DISTINCT salary\n"
                 "FROM employees\n"
@@ -363,7 +380,8 @@ Return a JSON object with:
             }
 
         # 8. Sales dataset questions (trends, monthly revenue, region breakdown)
-        if "sales" in q or "revenue" in q or "order" in q or "customer" in q:
+        # Only execute if sales_orders table exists in this project
+        if "sales_orders" in available_tables and ("sales" in q or "revenue" in q or "order" in q or "customer" in q):
             if "month" in q or "trend" in q:
                 sql = (
                     "SELECT TO_CHAR(order_date, 'YYYY-MM') AS order_month,\n"
@@ -449,7 +467,7 @@ Return a JSON object with:
                     "validation": SQLValidator.validate_query(sql)
                 }
 
-        # 9. Top N employees or salary filtering
+        # 9. Top N records or salary filtering
         match_top = re.search(r'top\s+(\d+)', q)
         limit_count = match_top.group(1) if match_top else None
 
@@ -457,19 +475,22 @@ Return a JSON object with:
 
         if match_salary:
             salary_val = match_salary.group(1).replace(",", "")
-            sql = f"SELECT * FROM employees WHERE salary > {salary_val} ORDER BY salary DESC;"
+            # Pick salary column from primary_table if exists, otherwise fallback to employees if available
+            target_tbl = "employees" if "employees" in available_tables else primary_table
+            sort_c = "salary" if "salary" in col_names else (col_names[1] if len(col_names) > 1 else col_names[0])
+            sql = f"SELECT * FROM {target_tbl} WHERE {sort_c} > {salary_val} ORDER BY {sort_c} DESC;"
             return {
-                "intent": f"Find employees earning more than {salary_val}",
+                "intent": f"Find records in {target_tbl} with {sort_c} > {salary_val}",
                 "generated_sql": sql,
                 "query_type": "SELECT",
-                "relevant_tables": ["employees"],
-                "relevant_columns": ["employee_id", "first_name", "last_name", "salary"],
-                "explanation": f"Filters employee records where salary > {salary_val} sorted descending.",
+                "relevant_tables": [target_tbl],
+                "relevant_columns": [sort_c],
+                "explanation": f"Filters records where {sort_c} > {salary_val} sorted descending.",
                 "visualization_recommendation": {
                     "chart_type": "bar",
-                    "x_axis": "first_name",
-                    "y_axis": "salary",
-                    "title": f"Employees Earning > {salary_val}"
+                    "x_axis": col_names[0] if col_names else "id",
+                    "y_axis": sort_c,
+                    "title": f"Records with {sort_c} > {salary_val}"
                 },
                 "requires_confirmation": False,
                 "validation": SQLValidator.validate_query(sql)

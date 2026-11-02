@@ -8,8 +8,9 @@ logger = logging.getLogger("ai_service.llm")
 
 class LLMProvider:
     """
-    Unified LLM Provider abstraction supporting Gemini, OpenAI, and
-    deterministic schema-aware SQL generation fallback.
+    Unified LLM Provider abstraction supporting Gemini (via google-genai SDK),
+    OpenAI, and a deterministic schema-aware SQL fallback.
+    Uses the modern `google.genai` client instead of the deprecated `google.generativeai`.
     """
     def __init__(self, provider: Optional[str] = None, api_key: Optional[str] = None):
         self.provider = provider or settings.DEFAULT_LLM_PROVIDER
@@ -28,12 +29,11 @@ class LLMProvider:
     def _init_client(self):
         if self.provider == "gemini" and self.api_key:
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                self._gemini_client = genai.GenerativeModel(settings.GEMINI_MODEL)
-                logger.info(f"Gemini client initialized with model {settings.GEMINI_MODEL}")
+                from google import genai
+                self._gemini_client = genai.Client(api_key=self.api_key)
+                logger.info(f"Gemini client (google-genai) initialized with model {settings.GEMINI_MODEL}")
             except Exception as e:
-                logger.warning(f"Failed to initialize Gemini: {e}")
+                logger.warning(f"Failed to initialize Gemini (google-genai): {e}")
                 self._gemini_client = None
 
         elif self.provider == "openai" and self.api_key:
@@ -56,10 +56,13 @@ class LLMProvider:
         """Generates text from configured LLM provider."""
         if self.provider == "gemini" and self._gemini_client:
             try:
+                from google import genai
+                from google.genai import types
                 full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-                response = self._gemini_client.generate_content(
-                    full_prompt,
-                    generation_config={"temperature": temperature}
+                response = self._gemini_client.models.generate_content(
+                    model=settings.GEMINI_MODEL,
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(temperature=temperature),
                 )
                 return response.text
             except Exception as e:
@@ -84,19 +87,23 @@ class LLMProvider:
                 raise e
 
         # If no external API key is configured, return notification
-        raise ValueError(f"No active API credentials for provider '{self.provider}'. Please configure GEMINI_API_KEY or OPENAI_API_KEY in settings or .env.")
+        raise ValueError(
+            f"No active API credentials for provider '{self.provider}'. "
+            "Please configure GEMINI_API_KEY or OPENAI_API_KEY in settings or .env."
+        )
 
     def generate_stream(self, prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.1):
         """Streams text chunks from configured LLM provider."""
         if self.provider == "gemini" and self._gemini_client:
             try:
+                from google import genai
+                from google.genai import types
                 full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-                response = self._gemini_client.generate_content(
-                    full_prompt,
-                    generation_config={"temperature": temperature},
-                    stream=True
-                )
-                for chunk in response:
+                for chunk in self._gemini_client.models.generate_content_stream(
+                    model=settings.GEMINI_MODEL,
+                    contents=full_prompt,
+                    config=types.GenerateContentConfig(temperature=temperature),
+                ):
                     if chunk.text:
                         yield chunk.text
                 return
@@ -135,7 +142,7 @@ class LLMProvider:
     def generate_structured_json(self, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """Generates structured JSON response from LLM."""
         json_sys_prompt = (
-            (system_prompt or "") + 
+            (system_prompt or "") +
             "\nYou MUST output valid JSON only. Do not include markdown code fence formatting or surrounding conversational text."
         )
         raw_text = self.generate_completion(prompt, system_prompt=json_sys_prompt)

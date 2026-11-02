@@ -99,13 +99,13 @@ export const DatasetManagerPage: React.FC = () => {
         </div>
         <div className="space-y-1">
           <h3 className="text-sm font-semibold text-foreground">Select a dataset file to import</h3>
-          <p className="text-xs text-muted-foreground">Supported formats: JSON arrays, CSV spreadsheets, and tabular PDFs (up to 50MB)</p>
+          <p className="text-xs text-muted-foreground">Supported formats: JSON arrays, CSV spreadsheets, PDF, and DOCX documents (up to 50MB)</p>
         </div>
 
         <form onSubmit={handleUpload} className="space-y-4 max-w-md mx-auto pt-2">
           <input
             type="file"
-            accept=".csv,.json,.pdf,.txt"
+            accept=".csv,.json,.pdf,.txt,.docx"
             onChange={e => setSelectedFile(e.target.files?.[0] || null)}
             className="w-full text-xs text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-primary file:text-primary-foreground hover:file:bg-primary/90 cursor-pointer"
           />

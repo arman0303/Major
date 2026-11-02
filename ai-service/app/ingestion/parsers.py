@@ -2,6 +2,8 @@ import io
 import json
 import csv
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Dict, Any, List, Optional, Tuple
 import pandas as pd
 from pypdf import PdfReader
@@ -87,6 +89,32 @@ class DataParser:
             "is_structured": len(tables_extracted) > 0,
             "chunks": chunks,
         }
+
+    @classmethod
+    def parse_docx(cls, file_content: bytes, filename: str) -> Dict[str, Any]:
+        """Extracts text and generates chunks from DOCX Word documents."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_content)) as z:
+                xml_content = z.read("word/document.xml")
+                tree = ET.fromstring(xml_content)
+                ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                paragraphs = []
+                for p in tree.iterfind(".//w:p", ns):
+                    texts = [node.text for node in p.iterfind(".//w:t", ns) if node.text]
+                    if texts:
+                        paragraphs.append("".join(texts))
+                full_text = "\n\n".join(paragraphs)
+                chunks = cls.chunk_text(full_text, filename)
+                return {
+                    "file_name": filename,
+                    "page_count": max(1, len(paragraphs) // 15),
+                    "text_content": full_text,
+                    "paragraphs": paragraphs,
+                    "is_structured": False,
+                    "chunks": chunks,
+                }
+        except Exception as e:
+            raise ValueError(f"Failed to parse DOCX file: {str(e)}")
 
     @classmethod
     def _profile_dataframe(cls, df: pd.DataFrame, filename: str) -> Dict[str, Any]:

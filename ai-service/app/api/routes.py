@@ -388,6 +388,8 @@ async def parse_file(file: UploadFile = File(...)):
             return DataParser.parse_json(contents, filename)
         elif lower_name.endswith(".pdf"):
             return DataParser.parse_pdf(contents, filename)
+        elif lower_name.endswith(".docx"):
+            return DataParser.parse_docx(contents, filename)
         elif lower_name.endswith(".txt"):
             return {
                 "type": "text",

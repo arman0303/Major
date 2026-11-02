@@ -1,4 +1,3 @@
-import os
 import math
 from typing import List, Optional
 from ..config import settings
@@ -7,7 +6,7 @@ from ..llm.provider import LLMProvider
 class EmbeddingService:
     """
     Generates genuine semantic vector embeddings using the configured provider
-    (Google Gemini or OpenAI). Does NOT use fake hash vectors.
+    (Google Gemini via google-genai SDK, or OpenAI). Does NOT use fake hash vectors.
     """
     def __init__(self, provider: Optional[LLMProvider] = None):
         self.provider = provider or LLMProvider()
@@ -29,27 +28,40 @@ class EmbeddingService:
                     "Please set GEMINI_API_KEY in your .env file."
                 )
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=api_key)
+                from google import genai
+                from google.genai import types
+                client = genai.Client(api_key=api_key)
+                model = settings.GEMINI_EMBEDDING_MODEL
                 try:
-                    res = genai.embed_content(
-                        model=settings.GEMINI_EMBEDDING_MODEL,
-                        content=text,
-                        task_type="retrieval_document",
-                        output_dimensionality=self.dimension
+                    # Try with output_dimensionality if the model supports it
+                    result = client.models.embed_content(
+                        model=model,
+                        contents=text,
+                        config=types.EmbedContentConfig(
+                            task_type="retrieval_document",
+                            output_dimensionality=self.dimension,
+                        ),
                     )
                 except Exception:
-                    # Fallback for models or API versions where output_dimensionality is not recognized
-                    res = genai.embed_content(
-                        model=settings.GEMINI_EMBEDDING_MODEL,
-                        content=text,
-                        task_type="retrieval_document"
+                    # Fallback without output_dimensionality parameter
+                    result = client.models.embed_content(
+                        model=model,
+                        contents=text,
+                        config=types.EmbedContentConfig(
+                            task_type="retrieval_document",
+                        ),
                     )
-                embedding = res.get("embedding")
+                # google-genai SDK returns a EmbedContentResponse;
+                # embeddings are in result.embeddings[0].values
+                if result.embeddings and len(result.embeddings) > 0:
+                    embedding = result.embeddings[0].values
+                else:
+                    raise RuntimeError("Gemini embed_content returned an empty embedding response.")
+
                 if not embedding:
                     raise RuntimeError("Gemini embed_content returned an empty embedding vector.")
                 # Ensure vector is normalized to self.dimension (768)
-                return self._normalize(embedding[:self.dimension])
+                return self._normalize(list(embedding)[:self.dimension])
             except Exception as e:
                 raise RuntimeError(f"Gemini embedding generation failed: {str(e)}")
 
