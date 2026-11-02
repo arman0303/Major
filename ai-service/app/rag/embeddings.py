@@ -75,14 +75,17 @@ class EmbeddingService:
             try:
                 from openai import OpenAI
                 client = OpenAI(api_key=api_key)
+                # Request exactly 768 dimensions (text-embedding-3-small supports
+                # the `dimensions` parameter to avoid truncation artifacts)
                 res = client.embeddings.create(
                     model="text-embedding-3-small",
-                    input=text
+                    input=text,
+                    dimensions=self.dimension,
                 )
                 embedding = res.data[0].embedding
                 if not embedding:
                     raise RuntimeError("OpenAI embeddings.create returned an empty embedding.")
-                return self._normalize(embedding[:self.dimension])
+                return self._normalize(list(embedding))
             except Exception as e:
                 raise RuntimeError(f"OpenAI embedding generation failed: {str(e)}")
 

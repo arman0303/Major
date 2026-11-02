@@ -35,6 +35,13 @@ export class DatabaseManager {
         await client.query(sql2).catch((e: any) => console.warn('Migration 002 warning:', e.message));
         console.log('✅ PostgreSQL migration 002 applied.');
       }
+      // Run migration 003
+      const migration3 = path.resolve(__dirname, '../../../database/migrations/003_fix_document_chunks.sql');
+      if (fs.existsSync(migration3)) {
+        const sql3 = fs.readFileSync(migration3, 'utf-8');
+        await client.query(sql3).catch((e: any) => console.warn('Migration 003 warning:', e.message));
+        console.log('✅ PostgreSQL migration 003 applied.');
+      }
       client.release();
     } catch (err: any) {
       console.warn('⚠️ PostgreSQL connection failed:', err.message);

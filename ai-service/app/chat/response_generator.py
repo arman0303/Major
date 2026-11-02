@@ -3,14 +3,16 @@ Response Generator — routes classified intents to the correct handler
 and produces a unified ChatResponse object.
 
 Handles:
-  - sql_analytics      → SQLGenerator + execution
-  - document_qa        → RAG retrieval + LLM answer
-  - hybrid             → Both SQL + RAG combined
-  - general_knowledge  → Direct LLM answer (no SQL)
-  - greeting           → Warm, brief response
-  - schema_management  → SchemaCreator
-  - data_modification  → SQL with confirmation required
-  - ambiguous          → Clarification question
+  - sql_analytics         → SQLGenerator + execution
+  - document_qa           → RAG retrieval + LLM answer
+  - hybrid                → Both SQL + RAG combined
+  - general_knowledge     → Direct LLM answer (DB/SQL concepts)
+  - general_conversation  → General-purpose AI conversation (any topic)
+  - programming_help      → Code writing, debugging, algorithms, interview prep
+  - greeting              → Warm, brief response
+  - schema_management     → SchemaCreator
+  - data_modification     → SQL with confirmation required
+  - ambiguous             → Clarification question
 """
 
 import re
@@ -20,17 +22,47 @@ from ..sql.generator import SQLGenerator
 from ..sql.validator import SQLValidator
 from ..schema.creator import SchemaCreator
 
-SYSTEM_CHAT_PROMPT = """You are a professional AI data analyst assistant named DataPilot.
-You help users understand their data, answer questions from documents, and generate SQL queries.
+SYSTEM_CHAT_PROMPT = """You are DataPilot, an intelligent AI assistant that helps users with a wide range of tasks.
+
+Your capabilities include:
+- General knowledge: science, history, technology, mathematics, writing, brainstorming
+- AI & Machine Learning: concepts, architectures, comparisons, applications
+- Programming & software engineering: code writing, debugging, algorithms, data structures, system design, interview prep
+- Database analytics: SQL query generation, data analysis, schema design
+- Document analysis: answering questions from uploaded PDFs and documents
 
 Guidelines:
-- Be concise and direct. Avoid filler phrases like "Certainly!" or "Great question!".
+- Be concise, accurate, and direct. Avoid filler phrases like "Certainly!" or "Great question!".
+- For code questions, always provide working code examples with explanations.
+- For conceptual questions, give clear explanations with real-world examples.
 - For SQL questions, explain results in plain language after showing the data.
-- For conceptual questions, give clear explanations with examples.
 - For document questions, cite the source (document name and page if known).
+- Use conversation history to resolve follow-up questions like "explain it again", "give me an example", "what are its advantages?", "continue from where we stopped".
 - When unsure, ask a focused clarification question.
 - Use professional but friendly language.
 - Never fabricate data or pretend to have executed a query you haven't.
+- Never expose API keys or internal configuration details.
+"""
+
+PROGRAMMING_SYSTEM_PROMPT = """You are DataPilot, an expert software engineering AI assistant.
+
+You help with:
+- Writing, explaining, debugging, and optimizing code in any language (Python, Java, JavaScript, TypeScript, C++, Go, Rust, etc.)
+- Algorithms and data structures (time/space complexity, implementations, comparisons)
+- System design concepts and patterns (microservices, databases, caching, load balancing)
+- Interview preparation (technical questions, solutions, step-by-step explanations)
+- Software architecture and design patterns (MVC, SOLID, Observer, Factory, etc.)
+- Framework and library explanations (React, Node.js, Django, Flask, Spring, etc.)
+- Computer science fundamentals (OS, DBMS, Computer Networks, Compiler Design)
+- Competitive programming and problem solving
+
+Guidelines:
+- Always provide working, well-commented code examples.
+- Explain step by step. Use numbered lists for multi-step processes.
+- For algorithms, explain the approach first, then show code, then discuss time and space complexity.
+- For debugging, identify the bug clearly before showing the fix.
+- For system design, cover components, scalability, and trade-offs.
+- Use conversation history to build on previous explanations when user says "give me an example", "explain it again", "make it simpler", etc.
 """
 
 
@@ -59,7 +91,13 @@ class ResponseGenerator:
         Returns a unified response dict.
         """
         if intent == "greeting":
-            return self._handle_greeting(message)
+            return self._handle_greeting(message, conversation_history)
+
+        elif intent == "general_conversation":
+            return self._handle_general_conversation(message, conversation_history)
+
+        elif intent == "programming_help":
+            return self._handle_programming_help(message, conversation_history)
 
         elif intent == "general_knowledge":
             return self._handle_general_knowledge(message, conversation_history)
@@ -84,17 +122,43 @@ class ResponseGenerator:
 
     # ── Handlers ─────────────────────────────────────────────────────────────
 
-    def _handle_greeting(self, message: str) -> Dict[str, Any]:
-        """Handle greetings naturally without SQL."""
+    def _handle_greeting(self, message: str, history: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Handle greetings naturally. Use LLM if available for personalized response."""
+        if self.provider.has_active_api_key():
+            try:
+                context = self._format_history(history, max_turns=3)
+                prompt = f"""The user sent a greeting or introductory message. Respond warmly and briefly.
+Mention that you can help with: general knowledge, AI/ML concepts, programming, SQL analytics, and document analysis.
+
+{f"Recent conversation:{chr(10)}{context}" if context else ""}
+User: {message}
+
+Keep your response to 2-3 sentences. Be friendly and welcoming."""
+                answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.5)
+                return self._chat_response(answer, "greeting")
+            except Exception:
+                pass
+
+        # Static fallback
         greetings = {
-            "hello": "Hello! I'm your AI data analyst. You can ask me to query your database, analyze uploaded documents, or explain database concepts. What would you like to explore?",
-            "hi": "Hi there! Ready to help you with data analysis and SQL. What are you working on today?",
-            "hey": "Hey! Ask me anything about your data — SQL queries, document analysis, or database concepts.",
-            "thanks": "You're welcome! Let me know if you have more questions.",
-            "thank you": "Happy to help! Feel free to ask more questions.",
-            "good morning": "Good morning! Ready to dive into your data analysis whenever you are.",
-            "good afternoon": "Good afternoon! What data questions can I help with?",
-            "good evening": "Good evening! Let me know what you'd like to analyze.",
+            "hello": "Hello! I'm DataPilot, your AI assistant. I can help with general knowledge, AI/ML concepts, programming, SQL analytics, and document analysis. What would you like to explore?",
+            "hi": "Hi there! I'm DataPilot. Ask me anything — from programming questions and AI concepts to SQL queries and document analysis. What are you working on today?",
+            "hey": "Hey! I'm DataPilot, your AI assistant. I can help with programming, AI concepts, database analytics, and much more. What do you need?",
+            "thanks": "You're welcome! Feel free to ask if you have more questions — I'm here to help.",
+            "thank you": "Happy to help! Let me know if there's anything else you'd like to know.",
+            "good morning": "Good morning! I'm DataPilot, ready to assist with coding, AI concepts, SQL analytics, or anything else you need.",
+            "good afternoon": "Good afternoon! What can I help you with today?",
+            "good evening": "Good evening! Ask me anything — programming, AI, databases, or general knowledge.",
+            "how are you": "I'm doing great and ready to help! What would you like to explore today?",
+            "what can you do": (
+                "I can help with a wide range of tasks:\n"
+                "- **General knowledge**: science, history, writing, math\n"
+                "- **AI & ML**: explain concepts, architectures, and use cases\n"
+                "- **Programming**: write, debug, and explain code in any language\n"
+                "- **SQL & Databases**: generate queries, analyze data, design schemas\n"
+                "- **Document Analysis**: answer questions from uploaded PDFs\n\n"
+                "What would you like to start with?"
+            ),
         }
 
         msg_lower = message.lower().strip().rstrip("!.,")
@@ -102,32 +166,100 @@ class ResponseGenerator:
             if key in msg_lower:
                 return self._chat_response(response, "greeting")
 
-        # Generic greeting
         return self._chat_response(
-            "Hello! I'm your AI data analyst. I can help you query databases, analyze uploaded documents, and explain SQL concepts. What would you like to explore?",
+            "Hello! I'm DataPilot, your AI assistant. I can help with programming, AI/ML concepts, SQL analytics, document analysis, and much more. What would you like to explore?",
             "greeting"
         )
+
+    def _handle_general_conversation(
+        self, message: str, history: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """Handle general-purpose AI conversation on ANY topic."""
+        if not self.provider.has_active_api_key():
+            return self._no_llm_response()
+
+        context = self._format_history(history, max_turns=10)
+        prompt = f"""Answer the following question or request comprehensively and clearly.
+
+{f"Conversation history:{chr(10)}{context}{chr(10)}" if context else ""}
+User: {message}
+
+Provide a thorough, accurate, and well-structured response. Use markdown formatting where appropriate (headings, bullet points, bold text). If this is a follow-up question, use the conversation history to understand context."""
+
+        try:
+            answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.4)
+            return self._chat_response(answer, "general_conversation", response_source="llm_conversation")
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "quota" in error_msg.lower():
+                return self._chat_response(
+                    "⚠️ **API Quota Exceeded**: Your Gemini API quota has been exhausted for today. "
+                    "Please wait until your quota resets or upgrade to a paid plan at https://ai.dev/. "
+                    "You can still use SQL analytics with local deterministic processing.",
+                    "general_conversation"
+                )
+            return self._chat_response(
+                f"I encountered an error generating a response. Please check your API key configuration in Settings.",
+                "general_conversation"
+            )
+
+    def _handle_programming_help(
+        self, message: str, history: List[Dict[str, str]]
+    ) -> Dict[str, Any]:
+        """Handle programming, coding, algorithms, and interview prep questions."""
+        if not self.provider.has_active_api_key():
+            return self._no_llm_response()
+
+        context = self._format_history(history, max_turns=10)
+        prompt = f"""Provide expert programming help for the following question.
+
+{f"Conversation history:{chr(10)}{context}{chr(10)}" if context else ""}
+User: {message}
+
+Guidelines:
+- Provide working, well-commented code examples
+- Explain the approach step by step
+- For algorithms, include time and space complexity analysis
+- For debugging, identify the specific issue and explain the fix
+- Use the conversation history to resolve follow-up questions like "explain it again" or "give me an example"
+- Format code blocks properly with the language name (e.g. ```java, ```python)"""
+
+        try:
+            answer = self.provider.generate_completion(prompt, system_prompt=PROGRAMMING_SYSTEM_PROMPT, temperature=0.3)
+            return self._chat_response(answer, "programming_help", response_source="llm_conversation")
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "quota" in error_msg.lower():
+                return self._chat_response(
+                    "⚠️ **API Quota Exceeded**: Your Gemini API quota has been exhausted for today. "
+                    "Please wait until your quota resets or upgrade your plan at https://ai.dev/.",
+                    "programming_help"
+                )
+            return self._chat_response(
+                "I encountered an error generating a response. Please check your API key in Settings.",
+                "programming_help"
+            )
 
     def _handle_general_knowledge(
         self, message: str, history: List[Dict[str, str]]
     ) -> Dict[str, Any]:
-        """Answer conceptual/educational questions without SQL."""
+        """Answer conceptual/educational questions about databases and SQL."""
         if not self.provider.has_active_api_key():
             return self._fallback_conceptual(message)
 
-        context = self._format_history(history, max_turns=6)
-        prompt = f"""Answer this question clearly and concisely. Focus on accuracy and clarity.
+        context = self._format_history(history, max_turns=8)
+        prompt = f"""Answer this database/SQL/data architecture question clearly and concisely.
 
 {f"Recent conversation:{chr(10)}{context}" if context else ""}
 
 Question: {message}
 
-Provide a clear explanation. If it's about SQL or databases, include a brief example."""
+Provide a clear explanation with examples where helpful. Include SQL code snippets for SQL concepts."""
 
         try:
             answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.3)
-            return self._chat_response(answer, "general_knowledge")
-        except Exception as e:
+            return self._chat_response(answer, "general_knowledge", response_source="llm_conversation")
+        except Exception:
             return self._fallback_conceptual(message)
 
     def _handle_schema_management(self, message: str) -> Dict[str, Any]:
@@ -142,10 +274,12 @@ Provide a clear explanation. If it's about SQL or databases, include a brief exa
                 "requires_confirmation": True,
                 "generated_sql": "\n\n".join(result.get("ddl_statements", [])),
                 "query_type": "CREATE",
+                "response_source": "schema_generator",
+                "document_sources": [],
             }
-        except Exception as e:
+        except Exception:
             return self._chat_response(
-                f"I understand you want to create a schema. To help better, could you describe the tables and relationships you need? For example: 'Create a table for customers with name, email, and phone columns.'",
+                "I understand you want to create a schema. To help better, could you describe the tables and relationships you need? For example: 'Create a table for customers with name, email, and phone columns.'",
                 "schema_management"
             )
 
@@ -170,6 +304,7 @@ Provide a clear explanation. If it's about SQL or databases, include a brief exa
             f"Please review the SQL carefully before confirming execution.\n\n"
             f"{result.get('explanation', '')}"
         )
+        result["response_source"] = "sql_generator"
         return result
 
     def _handle_document_qa(
@@ -199,7 +334,6 @@ Provide a clear explanation. If it's about SQL or databases, include a brief exa
         ]
 
         if not self.provider.has_active_api_key():
-            # Show verified chunk content without LLM synthesis
             content = "\n\n".join(
                 f"**[{c.get('metadata', {}).get('source', 'Document')}, Page {c.get('metadata', {}).get('page_number', '?')}]**\n{c['content']}"
                 for c in chunks[:4]
@@ -210,7 +344,6 @@ Provide a clear explanation. If it's about SQL or databases, include a brief exa
                 sources=formatted_sources
             )
 
-        # Build context from chunks with explicit source markers
         context_parts = []
         for i, chunk in enumerate(chunks[:7], 1):
             meta = chunk.get("metadata", {})
@@ -220,7 +353,7 @@ Provide a clear explanation. If it's about SQL or databases, include a brief exa
             context_parts.append(f"--- EXCERPT {i} ({loc}) ---\n{chunk['content']}")
 
         context_text = "\n\n".join(context_parts)
-        history_context = self._format_history(history, max_turns=4)
+        history_context = self._format_history(history, max_turns=6)
 
         prompt = f"""You are answering a question based strictly on the provided uploaded document excerpts.
 
@@ -241,10 +374,10 @@ ANSWER:"""
 
         try:
             answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.1)
-            return self._chat_response(answer, "document_qa", sources=formatted_sources)
+            return self._chat_response(answer, "document_qa", sources=formatted_sources, response_source="document_rag")
         except Exception as e:
             return self._chat_response(
-                f"I found relevant excerpts from your document, but encountered an error synthesizing the final response: {str(e)}.\n\n"
+                f"I found relevant excerpts from your document, but encountered an error synthesizing the final response.\n\n"
                 f"**Top Excerpt [{formatted_sources[0]['document_name']}, Page {formatted_sources[0]['page_number']}]:**\n"
                 f"{chunks[0]['content'][:600]}...",
                 "document_qa",
@@ -263,7 +396,6 @@ ANSWER:"""
         sql_result = self._handle_sql_analytics(message, schema_context, history, previous_sql)
         doc_result = self._handle_document_qa(message, chunks, history)
 
-        # Combine answers
         combined = f"{sql_result.get('answer', sql_result.get('explanation', ''))}\n\n"
         if doc_result.get("answer") and "don't see any relevant" not in doc_result["answer"]:
             combined += f"**From documents:**\n{doc_result['answer']}"
@@ -271,6 +403,7 @@ ANSWER:"""
         sql_result["answer"] = combined.strip()
         sql_result["response_type"] = "hybrid"
         sql_result["document_sources"] = doc_result.get("sources", [])
+        sql_result["response_source"] = "hybrid"
         return sql_result
 
     def _handle_sql_analytics(
@@ -289,6 +422,7 @@ ANSWER:"""
         )
         result["response_type"] = "sql_analytics"
         result["answer"] = result.get("explanation", "Query generated.")
+        result["response_source"] = "sql_generator"
         return result
 
     def _handle_ambiguous(
@@ -319,7 +453,8 @@ Ask a single, helpful clarification question."""
             f"Are you looking to:\n"
             f"1. **Query the database** — run SQL analytics on your data?\n"
             f"2. **Search a document** — find information in an uploaded file?\n"
-            f"3. **Learn a concept** — get an explanation of a technical topic?\n\n"
+            f"3. **Learn a concept** — get an explanation of a technical topic?\n"
+            f"4. **Get programming help** — write or debug code?\n\n"
             f"Could you provide a bit more detail?",
             "ambiguous"
         )
@@ -339,7 +474,6 @@ Ask a single, helpful clarification question."""
         if row_count == 0 or not rows:
             return "The query was executed successfully against your database, but returned 0 records matching your criteria."
 
-        # If LLM key is available, generate grounded factual synthesis
         if self.provider.has_active_api_key():
             prompt = f"""You are DataPilot, a senior data analyst.
 A user asked this question:
@@ -372,12 +506,12 @@ Rules:
             except Exception:
                 pass
 
-        # Deterministic intelligent fallback when offline
+        # Deterministic fallback when offline
         if row_count == 1:
             row = rows[0]
             summary_parts = [f"**{k}**: {v}" for k, v in row.items()]
             return f"Query returned 1 record: {', '.join(summary_parts)}."
-        elif row_count > 1:
+        else:
             first_col = columns[0] if columns else "record"
             second_col = columns[1] if len(columns) > 1 else None
             samples = []
@@ -390,9 +524,27 @@ Rules:
             more_str = f" and {row_count - len(samples)} more" if row_count > len(samples) else ""
             return f"Found {row_count} records. Top entries: {sample_str}{more_str}."
 
-        return f"Query executed successfully, returning {row_count} records."
-
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _no_llm_response(self) -> Dict[str, Any]:
+        """Return a clear, honest message when no LLM API key is configured."""
+        return self._chat_response(
+            "⚠️ **AI Provider Not Configured**\n\n"
+            "To answer general questions, programming questions, and AI/ML concepts, "
+            "DataPilot needs a Gemini or OpenAI API key.\n\n"
+            "**To configure your API key:**\n"
+            "1. Go to **Settings** (gear icon)\n"
+            "2. Enter your Gemini API key (free at https://ai.google.dev/)\n"
+            "3. Select your preferred model\n"
+            "4. Save settings\n\n"
+            "Once configured, I can answer any general question, help with programming, "
+            "explain AI/ML concepts, and much more.\n\n"
+            "**Without an API key**, I can still:\n"
+            "- Execute SQL queries on your uploaded datasets\n"
+            "- Show data analytics results\n"
+            "- Answer basic database concept questions",
+            "general_conversation"
+        )
 
     def _fallback_conceptual(self, message: str) -> Dict[str, Any]:
         """Answer common DB concepts without an LLM API key."""
@@ -413,14 +565,10 @@ Rules:
             if keyword in msg_lower:
                 return self._chat_response(explanation, "general_knowledge")
 
-        return self._chat_response(
-            "That's a great question! To give you the most accurate answer, please configure a Gemini or OpenAI API key in Settings. "
-            "In the meantime, I can answer database analytics questions using your actual data.",
-            "general_knowledge"
-        )
+        return self._no_llm_response()
 
     @staticmethod
-    def _format_history(history: List[Dict[str, str]], max_turns: int = 6) -> str:
+    def _format_history(history: List[Dict[str, str]], max_turns: int = 10) -> str:
         """Format last N conversation turns as text context."""
         if not history:
             return ""
@@ -428,7 +576,7 @@ Rules:
         lines = []
         for msg in recent:
             role = msg.get("role", "user").capitalize()
-            content = msg.get("content", "")[:300]
+            content = msg.get("content", "")[:400]
             lines.append(f"{role}: {content}")
         return "\n".join(lines)
 
@@ -437,6 +585,7 @@ Rules:
         answer: str,
         response_type: str,
         sources: Optional[List[Dict]] = None,
+        response_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         return {
             "response_type": response_type,
@@ -445,4 +594,5 @@ Rules:
             "query_type": None,
             "requires_confirmation": False,
             "document_sources": sources or [],
+            "response_source": response_source or response_type,
         }

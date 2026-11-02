@@ -119,12 +119,11 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
   try {
     const userId = req.user!.id;
 
-    // 1. Verify conversation belongs to this user's project
+    // 1. Verify conversation belongs to this user's project (and user when user_id column exists)
     const convCheck = await DatabaseManager.query(
-      'SELECT id FROM conversations WHERE id = $1 AND project_id = $2',
-      [conversationId, projectId]
+      'SELECT id FROM conversations WHERE id = $1 AND project_id = $2 AND (user_id = $3 OR user_id IS NULL)',
+      [conversationId, projectId, userId]
     );
-    // Allow gracefully if conversation table has no user_id yet
     if (convCheck.rows.length === 0) {
       res.status(403).json({ error: 'Conversation not found or access denied' });
       return;

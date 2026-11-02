@@ -125,6 +125,19 @@ def health_check():
     }
 
 
+@router.get("/provider-status")
+def provider_status(provider: Optional[str] = None, api_key: Optional[str] = None):
+    """Check whether an LLM provider API key is configured and active."""
+    llm = LLMProvider(provider=provider, api_key=api_key)
+    has_key = llm.has_active_api_key()
+    active_provider = getattr(llm, "provider", provider or "gemini")
+    return {
+        "has_active_api_key": has_key,
+        "provider": active_provider,
+        "status": "configured" if has_key else "not_configured",
+    }
+
+
 @router.post("/chat")
 def unified_chat(req: ChatRequest):
     """
