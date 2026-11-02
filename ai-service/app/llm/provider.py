@@ -6,11 +6,20 @@ from ..config import settings
 
 logger = logging.getLogger("ai_service.llm")
 
+# Resilient priority order for Gemini models with high free-tier limits
+FALLBACK_GEMINI_MODELS = [
+    "gemini-2.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+]
+
 class LLMProvider:
     """
-    Unified LLM Provider abstraction supporting Gemini (via google-genai SDK),
-    OpenAI, and a deterministic schema-aware SQL fallback.
-    Uses the modern `google.genai` client instead of the deprecated `google.generativeai`.
+    Unified LLM Provider abstraction supporting Gemini (via google-genai SDK with
+    automatic quota-exhaustion fallback across models), OpenAI, and a deterministic
+    schema-aware SQL fallback.
     """
     def __init__(self, provider: Optional[str] = None, api_key: Optional[str] = None):
         self.provider = provider or settings.DEFAULT_LLM_PROVIDER
@@ -31,7 +40,7 @@ class LLMProvider:
             try:
                 from google import genai
                 self._gemini_client = genai.Client(api_key=self.api_key)
-                logger.info(f"Gemini client (google-genai) initialized with model {settings.GEMINI_MODEL}")
+                logger.info(f"Gemini client (google-genai) initialized with primary model {settings.GEMINI_MODEL}")
             except Exception as e:
                 logger.warning(f"Failed to initialize Gemini (google-genai): {e}")
                 self._gemini_client = None
@@ -52,22 +61,44 @@ class LLMProvider:
             return bool(self.api_key and self._openai_client)
         return False
 
+    def _get_gemini_candidate_models(self) -> List[str]:
+        """Returns ordered list of Gemini models to try, starting with the configured model."""
+        primary = settings.GEMINI_MODEL
+        candidates = [primary]
+        for m in FALLBACK_GEMINI_MODELS:
+            if m not in candidates:
+                candidates.append(m)
+        return candidates
+
     def generate_completion(self, prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.1) -> str:
-        """Generates text from configured LLM provider."""
+        """Generates text from configured LLM provider with automatic model fallback."""
         if self.provider == "gemini" and self._gemini_client:
-            try:
-                from google import genai
-                from google.genai import types
-                full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-                response = self._gemini_client.models.generate_content(
-                    model=settings.GEMINI_MODEL,
-                    contents=full_prompt,
-                    config=types.GenerateContentConfig(temperature=temperature),
-                )
-                return response.text
-            except Exception as e:
-                logger.error(f"Gemini generation error: {e}")
-                raise e
+            from google.genai import types
+            full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+            last_err = None
+
+            for model_name in self._get_gemini_candidate_models():
+                try:
+                    response = self._gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=full_prompt,
+                        config=types.GenerateContentConfig(temperature=temperature),
+                    )
+                    if response and response.text:
+                        return response.text
+                except Exception as e:
+                    last_err = e
+                    err_msg = str(e)
+                    # Catch quota exhaustion (429), model deprecation (404), or rate limits and rotate
+                    is_quota_or_notfound = any(c in err_msg for c in ["429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND", "quota", "limit", "Quota exceeded"])
+                    if is_quota_or_notfound:
+                        logger.warning(f"Gemini model '{model_name}' unavailable ({err_msg[:100]}...). Trying next candidate model...")
+                        continue
+                    else:
+                        raise e
+
+            logger.error(f"All Gemini models failed: {last_err}")
+            raise last_err
 
         elif self.provider == "openai" and self._openai_client:
             try:
@@ -93,23 +124,37 @@ class LLMProvider:
         )
 
     def generate_stream(self, prompt: str, system_prompt: Optional[str] = None, temperature: float = 0.1):
-        """Streams text chunks from configured LLM provider."""
+        """Streams text chunks from configured LLM provider with model fallback."""
         if self.provider == "gemini" and self._gemini_client:
-            try:
-                from google import genai
-                from google.genai import types
-                full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
-                for chunk in self._gemini_client.models.generate_content_stream(
-                    model=settings.GEMINI_MODEL,
-                    contents=full_prompt,
-                    config=types.GenerateContentConfig(temperature=temperature),
-                ):
-                    if chunk.text:
-                        yield chunk.text
-                return
-            except Exception as e:
-                logger.error(f"Gemini streaming error: {e}")
-                raise e
+            from google.genai import types
+            full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+            last_err = None
+
+            for model_name in self._get_gemini_candidate_models():
+                try:
+                    yielded_any = False
+                    for chunk in self._gemini_client.models.generate_content_stream(
+                        model=model_name,
+                        contents=full_prompt,
+                        config=types.GenerateContentConfig(temperature=temperature),
+                    ):
+                        if chunk.text:
+                            yielded_any = True
+                            yield chunk.text
+                    if yielded_any:
+                        return
+                except Exception as e:
+                    last_err = e
+                    err_msg = str(e)
+                    is_quota = any(c in err_msg for c in ["429", "RESOURCE_EXHAUSTED", "404", "NOT_FOUND", "quota", "limit"])
+                    if is_quota:
+                        logger.warning(f"Gemini streaming model '{model_name}' failed ({err_msg[:100]}...). Rotating...")
+                        continue
+                    else:
+                        raise e
+
+            logger.error(f"All Gemini streaming models failed: {last_err}")
+            raise last_err
 
         elif self.provider == "openai" and self._openai_client:
             try:

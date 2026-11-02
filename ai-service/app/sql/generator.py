@@ -1,7 +1,10 @@
 import re
+import logging
 from typing import Dict, Any, List, Optional
 from ..llm.provider import LLMProvider
 from .validator import SQLValidator
+
+logger = logging.getLogger("ai_service.sql")
 
 SYSTEM_SQL_PROMPT = """You are an expert PostgreSQL DBA and Senior Data Engineer.
 Your task is to translate natural language questions into syntactically valid, optimal PostgreSQL SQL queries.
@@ -126,9 +129,24 @@ Return a JSON object with:
                 res["validation_error"] = validation.get("error")
             return res
         except Exception as e:
-            # Do NOT silently fall back to hardcoded queries on unrelated tables
+            err_str = str(e)
+            is_quota_or_conn = any(term in err_str.lower() for term in ["429", "resource_exhausted", "quota", "limit", "rate limit", "connection", "timeout"])
+            if is_quota_or_conn and schema_context.get("tables"):
+                logger.warning(f"LLM API quota reached or connection issue ({err_str[:120]}). Falling back to schema-aware deterministic engine.")
+                fallback_res = self._generate_deterministic(
+                    question=question,
+                    tables_meta=schema_context.get("tables", {}),
+                    relationships=schema_context.get("relationships", []),
+                    previous_sql=previous_sql
+                )
+                fallback_res["explanation"] = (
+                    f"{fallback_res.get('explanation', '')}\n\n"
+                    f"*(Notice: LLM API free-tier quota was reached [429]. Query was dynamically synthesized using the database schema analyzer.)*"
+                )
+                return fallback_res
+
             raise RuntimeError(
-                f"LLM SQL Generation failed: {str(e)}. "
+                f"LLM SQL Generation failed: {err_str}. "
                 "Unable to dynamically generate SQL. Please verify your LLM API key and configuration."
             )
 
