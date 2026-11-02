@@ -19,6 +19,21 @@ Strict Rules:
 7. Return your response as a valid JSON object matching the exact structure requested.
 """
 
+def _extract_column_names(raw_cols: Any) -> List[str]:
+    """Extracts lowercase column names whether raw_cols is a list of dicts, list of strings, or a dict."""
+    if isinstance(raw_cols, dict) and "columns" in raw_cols:
+        raw_cols = raw_cols["columns"]
+    if not isinstance(raw_cols, (list, tuple, set)):
+        return []
+    res = []
+    for c in raw_cols:
+        if isinstance(c, dict):
+            res.append(c.get("name", "").lower())
+        else:
+            res.append(str(c).lower())
+    return [x for x in res if x]
+
+
 class SQLGenerator:
     """
     Translates Natural Language to PostgreSQL SQL using schema context,
@@ -67,7 +82,15 @@ class SQLGenerator:
         """LLM-based generation with Gemini or OpenAI."""
         schema_repr = []
         for table, cols in schema_context.get("tables", {}).items():
-            col_strs = [f"{c['name']} ({c['type']})" for c in cols]
+            if isinstance(cols, dict) and "columns" in cols:
+                cols = cols["columns"]
+            if isinstance(cols, (list, tuple)):
+                col_strs = [
+                    f"{c['name']} ({c.get('type', 'VARCHAR')})" if isinstance(c, dict) else str(c)
+                    for c in cols
+                ]
+            else:
+                col_strs = []
             schema_repr.append(f"Table: {table}\nColumns: {', '.join(col_strs)}")
 
         rel_repr = []
@@ -100,17 +123,19 @@ User Question: {question}
 
 Context-Aware Guidelines:
 - If this is a follow-up question (e.g. "Which region performed best?", "Show only the top three", "Filter by that department"), reference the previous executed SQL and recent conversation history to refine or extend the analysis.
+- STRICT SCHEMA ADHERENCE: Only query tables and columns that are explicitly listed in the Database Schema above. Do not invent, hallucinate, or reference non-existent tables or columns.
+- If the requested data or table is NOT in the provided schema, return "generated_sql": null, and explain in "explanation" that the table does not exist in the active project schema.
 - Generate valid PostgreSQL query syntax.
 - Formulate necessary JOINs, CTEs, or window functions where appropriate.
 
 Return a JSON object with:
 {{
   "intent": "Brief description of what user wants",
-  "generated_sql": "Valid PostgreSQL query",
-  "query_type": "SELECT | INSERT | UPDATE | DELETE | CREATE | DROP",
+  "generated_sql": "Valid PostgreSQL query or null if table not found in schema",
+  "query_type": "SELECT | INSERT | UPDATE | DELETE | CREATE | DROP | UNKNOWN",
   "relevant_tables": ["table1", "table2"],
   "relevant_columns": ["col1", "col2"],
-  "explanation": "Clear explanation of how the query works",
+  "explanation": "Clear explanation of how the query works or why the table was not found",
   "visualization_recommendation": {{
     "chart_type": "bar | line | pie | scatter | table | kpi",
     "x_axis": "column_name",
@@ -122,11 +147,30 @@ Return a JSON object with:
 
         try:
             res = self.provider.generate_structured_json(prompt, system_prompt=SYSTEM_SQL_PROMPT)
-            # Validate output using SQLValidator
-            validation = SQLValidator.validate_query(res["generated_sql"])
-            res["validation"] = validation
-            if not validation["is_valid"]:
-                res["validation_error"] = validation.get("error")
+            sql = res.get("generated_sql")
+            available = list(schema_context.get("tables", {}).keys())
+
+            if sql:
+                # Validate output using SQLValidator with full schema_context
+                validation = SQLValidator.validate_query(sql, schema_context=schema_context)
+                res["validation"] = validation
+                if not validation.get("is_valid"):
+                    res["validation_error"] = validation.get("error")
+                    # If query references unauthorized/hallucinated tables or columns, nullify SQL
+                    if validation.get("unauthorized_tables") or validation.get("missing_columns"):
+                        res["generated_sql"] = None
+                        res["explanation"] = (
+                            f"I could not find the requested table(s) or column(s) in your active project schema. "
+                            f"Available tables in this project are: {', '.join(available)}. "
+                            "Please specify which of these tables you would like to query, or upload a dataset containing the relevant data."
+                        )
+            else:
+                res["generated_sql"] = None
+                if not res.get("explanation"):
+                    res["explanation"] = (
+                        f"I could not identify any table or column in your active project schema matching your request. "
+                        f"Available tables: {', '.join(available)}."
+                    )
             return res
         except Exception as e:
             err_str = str(e)
@@ -176,19 +220,71 @@ Return a JSON object with:
         if previous_sql and ("only" in q or "sort" in q or "top" in q or "order by" in q or "them" in q or "where" in q or "filter" in q):
             return self._handle_followup(q, previous_sql, tables_meta)
 
-        # 2. Match relevant tables strictly from available schema
-        target_tables = []
+        # 2. Match relevant tables strictly from available schema (table names + column names)
+        table_scores: Dict[str, int] = {}
         for t in available_tables:
-            t_clean = t.lower().replace("_", " ")
-            if t.lower() in q or t_clean in q or (t.endswith("s") and t[:-1].lower() in q):
-                target_tables.append(t)
+            score = 0
+            t_lower = t.lower()
+            t_clean = t_lower.replace("_", " ")
+            if t_lower in q or t_clean in q:
+                score += 5
+            elif t_lower.endswith("s") and t_lower[:-1] in q:
+                score += 4
+            elif any(token in q.split() for token in t_clean.split() if len(token) > 2):
+                score += 2
 
-        if not target_tables:
-            target_tables = [available_tables[0]]
+            # Check columns in this table
+            cols_list = _extract_column_names(tables_meta.get(t, []))
+            for c_name in cols_list:
+                c_clean = c_name.replace("_", " ")
+                if c_name in q or c_clean in q:
+                    score += 3
+                elif any(word in q.split() for word in c_clean.split() if len(word) > 3):
+                    score += 1
 
+            if score > 0:
+                table_scores[t] = score
+
+        # Sort candidate tables by relevance score
+        sorted_candidates = sorted(table_scores.keys(), key=lambda x: table_scores[x], reverse=True)
+
+        if not sorted_candidates:
+            # Check domain entities only if they explicitly exist in the schema
+            has_emp = "employees" in available_tables and any(w in q for w in ["employee", "staff", "worker", "salary", "hire"])
+            has_dept = "departments" in available_tables and any(w in q for w in ["department", "dept", "division"])
+            has_sales = "sales_orders" in available_tables and any(w in q for w in ["sale", "revenue", "order", "product"])
+            if has_emp:
+                sorted_candidates.append("employees")
+            if has_dept:
+                sorted_candidates.append("departments")
+            if has_sales:
+                sorted_candidates.append("sales_orders")
+
+        if not sorted_candidates:
+            # NEVER select arbitrary available_tables[0].
+            # Explain limitation honestly without fabricating an unrelated query.
+            return {
+                "intent": "Unmatched schema intent",
+                "generated_sql": None,
+                "query_type": "UNKNOWN",
+                "relevant_tables": [],
+                "relevant_columns": [],
+                "explanation": (
+                    f"I could not identify any table or column in your active project schema related to '{question}'. "
+                    f"Available tables in this project are: {', '.join(available_tables)}. "
+                    "Please specify which of these tables you would like to query, or upload a dataset containing the relevant data."
+                ),
+                "visualization_recommendation": None,
+                "requires_confirmation": False,
+                "validation": {
+                    "is_valid": False,
+                    "error": f"No matching table in project schema. Available tables: {', '.join(available_tables)}"
+                }
+            }
+
+        target_tables = sorted_candidates
         primary_table = target_tables[0]
-        cols_info = tables_meta.get(primary_table, [])
-        col_names = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in cols_info]
+        col_names = _extract_column_names(tables_meta.get(primary_table, []))
 
         # 3. Department / Employee JOIN scenarios (ONLY if both tables exist)
         if "departments" in available_tables and "employees" in available_tables and "department" in q and ("employee" in q or "salary" in q):
@@ -555,7 +651,7 @@ Return a JSON object with:
 
         table_match = re.search(r'\bFROM\s+["\']?([a-zA-Z0-9_]+)["\']?', sql, re.IGNORECASE)
         primary_table = table_match.group(1).lower() if table_match else (list(tables_meta.keys())[0] if tables_meta else "employees")
-        table_cols = [c["name"].lower() if isinstance(c, dict) else str(c).lower() for c in tables_meta.get(primary_table, [])]
+        table_cols = _extract_column_names(tables_meta.get(primary_table, []))
 
         # Determine best sort column
         sort_col = "salary"

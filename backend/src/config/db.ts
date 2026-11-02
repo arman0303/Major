@@ -55,6 +55,16 @@ export class DatabaseManager {
     return this.isConnectedToPostgres;
   }
 
+  public static isDemoMode(): boolean {
+    return process.env.DEMO_MODE === 'true';
+  }
+
+  public static getDatabaseMode(): 'postgres' | 'demo' | 'offline' {
+    if (this.isConnectedToPostgres) return 'postgres';
+    if (this.isDemoMode()) return 'demo';
+    return 'offline';
+  }
+
   public static async transaction<T>(fn: (execQuery: (text: string, params?: any[]) => Promise<any>) => Promise<T>): Promise<T> {
     if (this.isConnectedToPostgres && this.pool) {
       const client = await this.pool.connect();
@@ -74,7 +84,11 @@ export class DatabaseManager {
     }
   }
 
-  public static async query<T extends import('pg').QueryResultRow = any>(text: string, params?: any[]): Promise<{ rows: T[]; rowCount: number; duration: number }> {
+  public static async query<T extends import('pg').QueryResultRow = any>(
+    text: string, 
+    params?: any[],
+    options?: { isAnalyticalQuery?: boolean }
+  ): Promise<{ rows: T[]; rowCount: number; duration: number; mode?: string }> {
     const start = Date.now();
     if (this.isConnectedToPostgres && this.pool) {
       const res: QueryResult<T> = await this.pool.query(text, params);
@@ -83,16 +97,31 @@ export class DatabaseManager {
         rows: res.rows,
         rowCount: res.rowCount || res.rows.length,
         duration,
+        mode: 'postgres',
       };
     }
 
-    // Local resilient execution fallback
+    // When PostgreSQL is offline:
+    const upper = text.trim().toUpperCase();
+    const systemTables = ['USERS', 'PROJECTS', 'DATASETS', 'CONVERSATIONS', 'MESSAGES', 'QUERY_HISTORY', 'SCHEMA_METADATA', 'RELATIONSHIPS', 'UPLOADED_FILES', 'USER_SETTINGS', 'SAVED_QUERIES', 'DASHBOARDS', 'DASHBOARD_WIDGETS'];
+    const referencesSystemTableOnly = systemTables.some(t => upper.includes(`FROM ${t}`) || upper.includes(`INTO ${t}`) || upper.includes(`UPDATE ${t}`));
+
+    // If an analytical user query is run while Postgres is offline and DEMO_MODE is not set:
+    if (!referencesSystemTableOnly && options?.isAnalyticalQuery && !this.isDemoMode()) {
+      throw new Error(
+        'Database Unavailable: PostgreSQL is not connected. Real SQL queries cannot be executed in offline mode. ' +
+        'Please ensure PostgreSQL is running or set DEMO_MODE=true for interactive simulation.'
+      );
+    }
+
+    // Local resilient execution fallback (for system tables or when in demo/test mode)
     const res = this.executeLocalQuery<T>(text, params);
     const duration = Date.now() - start;
     return {
       rows: res.rows,
       rowCount: res.rows.length,
       duration,
+      mode: this.isDemoMode() ? 'demo' : 'offline',
     };
   }
 

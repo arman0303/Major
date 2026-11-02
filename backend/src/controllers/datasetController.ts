@@ -144,8 +144,19 @@ function parseJSONLocally(filePath: string): { columns: any[]; rows: any[]; rowC
 
 export const listDatasets = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { projectId } = req.query;
+  const userId = req.user!.id;
   if (!projectId) {
     res.status(400).json({ error: 'projectId is required' });
+    return;
+  }
+
+  // Validate project ownership
+  const projectCheck = await DatabaseManager.query(
+    'SELECT id FROM projects WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+    [projectId, userId]
+  );
+  if (projectCheck.rows.length === 0) {
+    res.status(403).json({ error: 'Project not found or access denied' });
     return;
   }
 
@@ -159,6 +170,7 @@ export const listDatasets = async (req: AuthenticatedRequest, res: Response): Pr
 export const uploadDataset = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const file = req.file;
   const { projectId, name, tableName } = req.body;
+  const userId = req.user!.id;
 
   if (!file) {
     res.status(400).json({ error: 'No file uploaded' });
@@ -166,6 +178,16 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
   }
   if (!projectId) {
     res.status(400).json({ error: 'projectId is required' });
+    return;
+  }
+
+  // Validate project ownership
+  const projectCheck = await DatabaseManager.query(
+    'SELECT id FROM projects WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+    [projectId, userId]
+  );
+  if (projectCheck.rows.length === 0) {
+    res.status(403).json({ error: 'Project not found or access denied' });
     return;
   }
 
@@ -322,6 +344,10 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
     );
 
     // 5. Index Document Chunks for PDF, DOCX & TXT into RAG Store
+    let finalStatus: 'ready' | 'partial' | 'failed' = 'ready';
+    let indexedCount = 0;
+    const indexingErrors: string[] = [];
+
     if (fileExt === 'pdf' || fileExt === 'txt' || fileExt === 'docx') {
       let chunks: any[] = [];
       if (profileData?.chunks && profileData.chunks.length > 0) {
@@ -345,44 +371,85 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
         }
       }
 
-      // Record in uploaded_files
+      // Initial record in uploaded_files marked as 'indexing'
       await DatabaseManager.query(
         `INSERT INTO uploaded_files (id, user_id, project_id, original_name, file_type, file_size_bytes, status, chunk_count)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id) DO NOTHING`,
-        [datasetId, req.user?.id || 'default_user', projectId, file.originalname, fileExt, file.size, 'ready', chunks.length]
+         ON CONFLICT (id) DO UPDATE SET status = 'indexing'`,
+        [datasetId, userId, projectId, file.originalname, fileExt, file.size, 'indexing', chunks.length]
       ).catch(() => {});
 
-      // Index chunks into RAG store in batches of 5 concurrent requests to prevent timeouts
+      // Clear any prior chunks for this file to prevent duplicate accumulation on re-upload
+      try {
+        await axios.post(`${config.aiServiceUrl}/api/ai/rag/clear`, {
+          project_id: projectId,
+          user_id: userId,
+          file_id: datasetId,
+        }, { timeout: 5000 });
+      } catch { /* proceed */ }
+
+      // Index chunks into RAG store with explicit status verification per chunk
       const BATCH_CONCURRENCY = 5;
       for (let i = 0; i < chunks.length; i += BATCH_CONCURRENCY) {
         const batch = chunks.slice(i, i + BATCH_CONCURRENCY);
-        await Promise.allSettled(
-          batch.map(chunk =>
+        const batchResults = await Promise.allSettled(
+          batch.map((chunk, batchIdx) =>
             axios.post(
               `${config.aiServiceUrl}/api/ai/rag/index`,
               {
                 project_id: projectId,
-                user_id: req.user?.id || 'default_user',
+                user_id: userId,
                 file_id: datasetId,
+                chunk_index: i + batchIdx,
                 content: chunk.content,
                 metadata: {
                   source: file.originalname,
                   page_number: chunk.metadata?.page_number || 1,
+                  section: chunk.metadata?.section || null,
                   dataset_id: datasetId,
                 },
               },
-              { timeout: 8000 }
-            ).catch(ragErr => {
-              console.warn('RAG indexing chunk notice:', ragErr.message);
-            })
+              { timeout: 12000 }
+            )
           )
         );
+
+        for (const res of batchResults) {
+          if (res.status === 'fulfilled') {
+            indexedCount++;
+          } else {
+            const errDetail = res.reason?.response?.data?.detail || res.reason?.message || 'Indexing failed';
+            indexingErrors.push(errDetail);
+          }
+        }
       }
+
+      if (chunks.length > 0) {
+        if (indexedCount === chunks.length) {
+          finalStatus = 'ready';
+        } else if (indexedCount > 0) {
+          finalStatus = 'partial';
+        } else {
+          finalStatus = 'failed';
+        }
+      }
+
+      // Update final indexing status and chunk count in both tables
+      await DatabaseManager.query(
+        `UPDATE uploaded_files SET status = $1, chunk_count = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3`,
+        [finalStatus, indexedCount, datasetId]
+      ).catch(() => {});
+
+      await DatabaseManager.query(
+        `UPDATE datasets SET status = $1 WHERE id = $2`,
+        [finalStatus, datasetId]
+      ).catch(() => {});
     }
 
     res.status(201).json({
-      message: 'Dataset uploaded, profiled, and loaded successfully',
+      message: finalStatus === 'failed'
+        ? 'Dataset uploaded, but document chunk indexing failed. Please review indexing errors.'
+        : 'Dataset uploaded, profiled, and processed successfully',
       dataset: {
         id: datasetId,
         name: name || file.originalname,
@@ -391,6 +458,9 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
         row_count: rowCount,
         schema_info: columns,
         preview: profileData?.preview || parsedRows.slice(0, 10),
+        status: finalStatus,
+        chunks_indexed: indexedCount,
+        indexing_errors: indexingErrors.length > 0 ? indexingErrors : undefined,
       }
     });
   } catch (error: any) {

@@ -17,7 +17,7 @@ Handles:
 
 import re
 from typing import Dict, Any, List, Optional
-from ..llm.provider import LLMProvider
+from ..llm.provider import LLMProvider, classify_llm_error
 from ..sql.generator import SQLGenerator
 from ..sql.validator import SQLValidator
 from ..schema.creator import SchemaCreator
@@ -190,16 +190,10 @@ Provide a thorough, accurate, and well-structured response. Use markdown formatt
             answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.4)
             return self._chat_response(answer, "general_conversation", response_source="llm_conversation")
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "quota" in error_msg.lower():
-                return self._chat_response(
-                    "⚠️ **API Quota Exceeded**: Your Gemini API quota has been exhausted for today. "
-                    "Please wait until your quota resets or upgrade to a paid plan at https://ai.dev/. "
-                    "You can still use SQL analytics with local deterministic processing.",
-                    "general_conversation"
-                )
+            classified = classify_llm_error(e)
             return self._chat_response(
-                f"I encountered an error generating a response. Please check your API key configuration in Settings.",
+                f"⚠️ **AI Generation Notice**\n\n{classified['message']}\n\n"
+                f"Please verify your AI credentials or model selection in Settings.",
                 "general_conversation"
             )
 
@@ -228,15 +222,10 @@ Guidelines:
             answer = self.provider.generate_completion(prompt, system_prompt=PROGRAMMING_SYSTEM_PROMPT, temperature=0.3)
             return self._chat_response(answer, "programming_help", response_source="llm_conversation")
         except Exception as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg or "quota" in error_msg.lower():
-                return self._chat_response(
-                    "⚠️ **API Quota Exceeded**: Your Gemini API quota has been exhausted for today. "
-                    "Please wait until your quota resets or upgrade your plan at https://ai.dev/.",
-                    "programming_help"
-                )
+            classified = classify_llm_error(e)
             return self._chat_response(
-                "I encountered an error generating a response. Please check your API key in Settings.",
+                f"⚠️ **Programming Assistant Notice**\n\n{classified['message']}\n\n"
+                f"Please verify your AI credentials in Settings.",
                 "programming_help"
             )
 

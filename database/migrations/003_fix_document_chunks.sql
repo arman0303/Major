@@ -1,9 +1,10 @@
 -- Migration 003: Fix document_chunks schema mismatch
--- Migration 001 created document_chunks with minimal schema:
---   (id VARCHAR(36), project_id, dataset_id, content, metadata, embedding vector(768))
--- Migration 002 attempted to CREATE the same table with a different schema but was
--- silently ignored because the table already existed (CREATE TABLE IF NOT EXISTS).
--- This migration adds the missing columns that the RAG retriever expects.
+-- Ensures id is TEXT with safe UUID generation default,
+-- supplies missing chunk metadata columns, and creates tenant isolation indexes.
+
+-- Allow arbitrary length chunk IDs and set a safe automatic default
+ALTER TABLE document_chunks ALTER COLUMN id TYPE TEXT;
+ALTER TABLE document_chunks ALTER COLUMN id SET DEFAULT gen_random_uuid()::text;
 
 ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS file_id TEXT;
 ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS user_id TEXT;
@@ -17,7 +18,7 @@ UPDATE document_chunks
 SET file_id = CAST(dataset_id AS TEXT)
 WHERE file_id IS NULL AND dataset_id IS NOT NULL;
 
--- Add missing indexes for query performance
+-- Add missing indexes for query performance and strict tenant isolation
 CREATE INDEX IF NOT EXISTS idx_document_chunks_user_id ON document_chunks(user_id);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_file_id ON document_chunks(file_id);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_conversation_id ON document_chunks(conversation_id);

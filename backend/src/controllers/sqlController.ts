@@ -43,6 +43,18 @@ export const validateSQL = async (req: AuthenticatedRequest, res: Response): Pro
 
 export const previewSQL = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { sql, projectId } = previewSqlSchema.parse(req.body);
+  const userId = req.user!.id;
+
+  // Validate authenticated user ownership of the project
+  const projectCheck = await DatabaseManager.query(
+    'SELECT id FROM projects WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+    [projectId, userId]
+  );
+  if (projectCheck.rows.length === 0) {
+    res.status(403).json({ error: 'Project not found or access denied' });
+    return;
+  }
+
   const upper = sql.trim().toUpperCase();
 
   // If UPDATE or DELETE, preview affected records by converting to SELECT
@@ -85,6 +97,16 @@ export const previewSQL = async (req: AuthenticatedRequest, res: Response): Prom
 export const executeSQL = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { projectId, sql, isConfirmed, limit } = executeSqlSchema.parse(req.body);
   const userId = req.user!.id;
+
+  // Validate authenticated user ownership of the project
+  const projectCheck = await DatabaseManager.query(
+    'SELECT id FROM projects WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+    [projectId, userId]
+  );
+  if (projectCheck.rows.length === 0) {
+    res.status(403).json({ error: 'Project not found or access denied' });
+    return;
+  }
 
   // Security Check A: Reject multi-statement queries
   const statements = sql.split(';').map((s: string) => s.trim()).filter(Boolean);
@@ -135,7 +157,7 @@ export const executeSQL = async (req: AuthenticatedRequest, res: Response): Prom
   if (upper.startsWith('DROP')) queryType = 'DROP';
 
   try {
-    const execResult = await DatabaseManager.query(safeSql);
+    const execResult = await DatabaseManager.query(safeSql, undefined, { isAnalyticalQuery: true });
     const duration = Date.now() - startTime;
 
     const columnNames = execResult.rows.length > 0 ? Object.keys(execResult.rows[0]) : [];
@@ -155,6 +177,7 @@ export const executeSQL = async (req: AuthenticatedRequest, res: Response): Prom
       row_count: execResult.rowCount,
       execution_time_ms: duration,
       query_type: queryType,
+      database_mode: execResult.mode || DatabaseManager.getDatabaseMode(),
     });
   } catch (err: any) {
     const duration = Date.now() - startTime;

@@ -67,6 +67,15 @@ export const ChatWorkspace: React.FC = () => {
   const [activeDuration, setActiveDuration] = useState<number | undefined>(undefined);
   const [activeError, setActiveError] = useState<string | null>(null);
   const [isInspectorOpen, setIsInspectorOpen] = useState<boolean>(false);
+  const [dbMode, setDbMode] = useState<string>('postgres');
+
+  useEffect(() => {
+    api.getSystemStatus()
+      .then(res => {
+        if (res?.database_mode) setDbMode(res.database_mode);
+      })
+      .catch(() => {});
+  }, []);
 
   // Mutation confirmation modal
   const [pendingConfirmationSql, setPendingConfirmationSql] = useState<string | null>(null);
@@ -384,8 +393,13 @@ export const ChatWorkspace: React.FC = () => {
             <h1 className="font-semibold text-sm text-foreground truncate max-w-sm">
               {activeConv?.title || 'New Conversation'}
             </h1>
-            <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground font-medium">
-              PostgreSQL
+            <span className={cn(
+              "text-[11px] px-2 py-0.5 rounded-full font-medium transition-colors",
+              dbMode === 'postgres' ? "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20" :
+              dbMode === 'demo' ? "bg-amber-500/10 text-amber-500 border border-amber-500/20" :
+              "bg-muted text-muted-foreground border border-border"
+            )}>
+              {dbMode === 'postgres' ? 'PostgreSQL' : dbMode === 'demo' ? 'Demo Mode' : 'PostgreSQL'}
             </span>
           </div>
 

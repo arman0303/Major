@@ -257,6 +257,11 @@ export class SchemaService {
    * Verifies that generated SQL references ONLY tables and columns
    * that actually exist in the project schema.
    */
+  /**
+   * Verifies that generated SQL references ONLY tables and columns
+   * that actually exist in the project schema.
+   * Handles CTEs, table aliases, qualified columns, and single/multi-table column lookups.
+   */
   public static verifySQLAgainstSchema(
     sql: string,
     schema: ProjectSchemaContext
@@ -264,23 +269,107 @@ export class SchemaService {
     const missingTables: string[] = [];
     const missingColumns: string[] = [];
 
-    const allowedTables = Object.keys(schema.tables).map(t => t.toLowerCase());
-    if (allowedTables.length === 0) {
+    const allowedTablesMap: Record<string, Set<string>> = {};
+    for (const [tName, cols] of Object.entries(schema.tables)) {
+      allowedTablesMap[tName.toLowerCase()] = new Set(cols.map(c => c.name.toLowerCase()));
+    }
+
+    const allowedTableNames = Object.keys(allowedTablesMap);
+    if (allowedTableNames.length === 0) {
       return { valid: true, missingTables: [], missingColumns: [] };
     }
 
-    // Simple AST/Regex inspection for FROM and JOIN clauses
-    const fromJoinMatches = sql.matchAll(/\b(?:FROM|JOIN)\s+["']?([a-zA-Z0-9_]+)["']?/gi);
+    // 1. Identify CTE names (e.g. WITH cte_name AS (...), second_cte AS (...))
+    const cteNames = new Set<string>();
+    const cteMatches = sql.matchAll(/(?:WITH|,)\s+([a-zA-Z0-9_]+)\s+AS\s*\(/gi);
+    for (const match of cteMatches) {
+      cteNames.add(match[1].toLowerCase());
+    }
+
+    // 2. Identify referenced tables and their aliases in FROM and JOIN
+    const referencedTables: string[] = [];
+    const tableAliasMap: Record<string, string> = {}; // alias -> real table name
+    const fromJoinMatches = sql.matchAll(/\b(?:FROM|JOIN)\s+["']?([a-zA-Z0-9_]+)["']?(?:\s+(?:AS\s+)?([a-zA-Z0-9_]+))?/gi);
     for (const match of fromJoinMatches) {
       const tableName = match[1].toLowerCase();
-      // Ignore CTE names or common aliases
-      if (!allowedTables.includes(tableName) && !tableName.startsWith('cte') && tableName !== 'select') {
-        missingTables.push(tableName);
+      const alias = match[2] ? match[2].toLowerCase() : null;
+
+      // Skip keywords and CTEs
+      if (['select', 'lateral', 'unnest', 'generate_series'].includes(tableName) || cteNames.has(tableName)) {
+        if (alias) cteNames.add(alias);
+        continue;
+      }
+
+      if (!allowedTableNames.includes(tableName)) {
+        if (!missingTables.includes(tableName)) {
+          missingTables.push(tableName);
+        }
+      } else {
+        referencedTables.push(tableName);
+        if (alias && !['on', 'where', 'join', 'left', 'right', 'inner', 'group', 'order'].includes(alias)) {
+          tableAliasMap[alias] = tableName;
+        }
+        tableAliasMap[tableName] = tableName;
+      }
+    }
+
+    // 3. Extract and verify qualified columns: alias.column or table.column
+    const qualifiedColMatches = sql.matchAll(/\b([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\b/gi);
+    for (const match of qualifiedColMatches) {
+      const prefix = match[1].toLowerCase();
+      const colName = match[2].toLowerCase();
+
+      // Skip CTEs, functions, schemas, or wildcard
+      if (cteNames.has(prefix) || ['public', 'pg_catalog', 'd', 's'].includes(prefix) && cteNames.has(prefix) || colName === '*') {
+        continue;
+      }
+
+      // If prefix matches a known table or alias
+      const resolvedTable = tableAliasMap[prefix] || (allowedTablesMap[prefix] ? prefix : null);
+      if (resolvedTable && allowedTablesMap[resolvedTable]) {
+        if (!allowedTablesMap[resolvedTable].has(colName)) {
+          const errMsg = `${colName} (in table '${resolvedTable}')`;
+          if (!missingColumns.includes(errMsg)) {
+            missingColumns.push(errMsg);
+          }
+        }
+      }
+    }
+
+    // 4. Verify unqualified columns when single table is referenced
+    if (referencedTables.length === 1 && cteNames.size === 0) {
+      const singleTable = referencedTables[0];
+      const validCols = allowedTablesMap[singleTable];
+
+      // Identify column references in SELECT, WHERE, ORDER BY, GROUP BY
+      const sqlKeywords = new Set([
+        'select', 'from', 'where', 'and', 'or', 'not', 'in', 'is', 'null', 'like', 'ilike',
+        'order', 'by', 'group', 'having', 'limit', 'offset', 'asc', 'desc', 'as', 'distinct',
+        'count', 'avg', 'sum', 'min', 'max', 'round', 'coalesce', 'case', 'when', 'then', 'else',
+        'end', 'true', 'false', 'join', 'inner', 'left', 'right', 'outer', 'on', 'with', 'over',
+        'partition', 'dense_rank', 'rank', 'row_number', 'between', 'exists', 'cast'
+      ]);
+
+      // Match standalone words in WHERE and ORDER BY clauses
+      const whereMatch = sql.match(/\bWHERE\s+([^;]+?)(?:\s+GROUP|\s+ORDER|\s+LIMIT|$)/i);
+      if (whereMatch) {
+        const whereClause = whereMatch[1];
+        const tokens = whereClause.match(/\b[a-zA-Z_][a-zA-Z0-9_]*\b/g) || [];
+        for (const token of tokens) {
+          const tLower = token.toLowerCase();
+          if (!sqlKeywords.has(tLower) && !whereClause.includes(`.${token}`) && isNaN(Number(token))) {
+            if (!validCols.has(tLower)) {
+              if (!missingColumns.includes(tLower)) {
+                missingColumns.push(tLower);
+              }
+            }
+          }
+        }
       }
     }
 
     return {
-      valid: missingTables.length === 0,
+      valid: missingTables.length === 0 && missingColumns.length === 0,
       missingTables,
       missingColumns,
     };

@@ -48,6 +48,12 @@ class GenerateSQLRequest(BaseModel):
     api_key: Optional[str] = None
 
 
+class ValidateSQLRequest(BaseModel):
+    sql: str
+    schema_context: Optional[Dict[str, Any]] = None
+    allowed_tables: Optional[List[str]] = None
+
+
 class ExplainSQLRequest(BaseModel):
     sql: str
     schema_context: Optional[Dict[str, Any]] = None
@@ -127,15 +133,13 @@ def health_check():
 
 @router.get("/provider-status")
 def provider_status(provider: Optional[str] = None, api_key: Optional[str] = None):
-    """Check whether an LLM provider API key is configured and active."""
+    """
+    Check whether an LLM provider is actually authenticated and capable of generating responses.
+    Performs a real lightweight probe request rather than only checking object initialization.
+    """
     llm = LLMProvider(provider=provider, api_key=api_key)
-    has_key = llm.has_active_api_key()
-    active_provider = getattr(llm, "provider", provider or "gemini")
-    return {
-        "has_active_api_key": has_key,
-        "provider": active_provider,
-        "status": "configured" if has_key else "not_configured",
-    }
+    health = llm.check_health()
+    return health
 
 
 @router.post("/chat")
@@ -191,10 +195,11 @@ def unified_chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail=f"Response generation failed: {str(e)}")
 
     return {
+        **response,
         "intent": intent,
+        "query_intent_description": response.get("intent") if intent == "sql_analytics" else None,
         "intent_confidence": classification["confidence"],
         "intent_method": classification["method"],
-        **response,
     }
 
 
@@ -242,6 +247,13 @@ def synthesize_answer(req: SynthesizeAnswerRequest):
         return {"synthesized_answer": synth}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/validate-sql")
+def validate_sql_endpoint(req: ValidateSQLRequest):
+    """AST-based SQL validation with schema table and column verification."""
+    allowed = set(req.allowed_tables) if req.allowed_tables else None
+    return SQLValidator.validate_query(req.sql, allowed_tables=allowed, schema_context=req.schema_context)
 
 
 @router.post("/generate-sql")

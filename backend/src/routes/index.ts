@@ -12,6 +12,7 @@ import * as conversationController from '../controllers/conversationController.j
 import * as sqlController from '../controllers/sqlController.js';
 import * as aiController from '../controllers/aiController.js';
 import * as dashboardController from '../controllers/dashboardController.js';
+import { DatabaseManager } from '../config/db.js';
 
 const upload = multer({
   dest: config.uploads.dir,
@@ -19,6 +20,15 @@ const upload = multer({
 });
 
 export const router = Router();
+
+// ================= SYSTEM STATUS =================
+router.get('/system/status', (_req, res) => {
+  res.json({
+    database_mode: DatabaseManager.getDatabaseMode(),
+    is_postgres: DatabaseManager.isPostgres(),
+    is_demo_mode: DatabaseManager.isDemoMode(),
+  });
+});
 
 // ================= AUTH ROUTES =================
 router.post('/auth/register', authController.register);

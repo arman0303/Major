@@ -149,6 +149,7 @@ class RAGRetriever:
         section = metadata.get("section")
 
         # 2. Persist to SQLite Disk Store
+        actual_user_id = user_id or "system_user"
         with sqlite3.connect(str(self.sqlite_path)) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -158,7 +159,7 @@ class RAGRetriever:
             """, (
                 chunk_id,
                 f_id,
-                user_id or "default_user",
+                actual_user_id,
                 project_id,
                 conversation_id,
                 chunk_index,
@@ -179,11 +180,16 @@ class RAGRetriever:
                     vec_str = f"[{','.join(str(round(x, 6)) for x in embedding)}]"
                     cur.execute("""
                         INSERT INTO document_chunks 
-                        (file_id, user_id, project_id, conversation_id, chunk_index, content, page_number, section, metadata, embedding)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                        (id, file_id, user_id, project_id, conversation_id, chunk_index, content, page_number, section, metadata, embedding)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                        ON CONFLICT (id) DO UPDATE SET
+                            content = EXCLUDED.content,
+                            metadata = EXCLUDED.metadata,
+                            embedding = EXCLUDED.embedding;
                     """, (
+                        chunk_id,
                         f_id,
-                        user_id or "default_user",
+                        actual_user_id,
                         project_id,
                         conversation_id,
                         chunk_index,
@@ -216,7 +222,8 @@ class RAGRetriever:
     ) -> List[Dict[str, Any]]:
         """
         Hybrid retrieval: semantic vector similarity + keyword boosting.
-        Scoped strictly by project_id and optional user_id.
+        Strict tenant and user scoping: when user_id is provided, only chunks
+        matching that exact user_id within the project are returned.
         """
         if not query.strip():
             return []
@@ -235,7 +242,7 @@ class RAGRetriever:
                     SELECT id, file_id, user_id, project_id, conversation_id, chunk_index, 
                            content, page_number, section, metadata, embedding
                     FROM document_chunks
-                    WHERE project_id = ? AND (user_id = ? OR user_id = 'default_user' OR user_id IS NULL)
+                    WHERE project_id = ? AND user_id = ?
                 """, (project_id, user_id))
             else:
                 cursor.execute("""

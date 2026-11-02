@@ -3,11 +3,12 @@ from typing import Dict, Any, List, Set, Optional
 import sqlglot
 from sqlglot import exp, parse_one, errors
 
+
 class SQLValidator:
     """
     Validates PostgreSQL queries using SQLGlot AST parsing,
     enforcing permission policies, statement single-tenancy,
-    and identifying accessed tables and columns.
+    identifying accessed tables/columns, and verifying against schema context.
     """
     
     DANGEROUS_COMMANDS = {
@@ -24,12 +25,13 @@ class SQLValidator:
     def validate_query(
         cls, 
         sql: str, 
-        allowed_tables: Optional[Set[str]] = None
+        allowed_tables: Optional[Set[str]] = None,
+        schema_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Parses and validates a SQL query string.
-        Returns a dictionary with validation status, query_type, tables, columns, 
-        requires_confirmation, and error details if any.
+        Parses and validates a SQL query string using AST traversal.
+        Validates syntax, query type, permissions, dangerous functions,
+        referenced tables, and referenced columns.
         """
         trimmed = sql.strip().rstrip(";")
         if not trimmed:
@@ -39,17 +41,20 @@ class SQLValidator:
                 "query_type": "UNKNOWN"
             }
 
-        # Check for multi-statement execution
-        # A semicolon not inside quotes followed by another statement
-        statements = sqlglot.parse(trimmed, read="postgres")
-        if len(statements) > 1:
-            return {
-                "is_valid": False,
-                "error": "Multiple SQL statements in a single execution are prohibited for security.",
-                "query_type": "MULTI_STATEMENT",
-                "requires_confirmation": True
-            }
+        # 1. Check for multi-statement execution via SQLGlot parser
+        try:
+            statements = sqlglot.parse(trimmed, read="postgres")
+            if len(statements) > 1:
+                return {
+                    "is_valid": False,
+                    "error": "Security Violation: Multiple SQL statements in a single execution are prohibited.",
+                    "query_type": "MULTI_STATEMENT",
+                    "requires_confirmation": True
+                }
+        except Exception:
+            pass
 
+        # 2. Parse Single AST
         try:
             expression = parse_one(trimmed, read="postgres")
         except errors.ParseError as e:
@@ -72,7 +77,7 @@ class SQLValidator:
                 "query_type": "UNKNOWN"
             }
 
-        # Determine Query Type
+        # 3. Determine Query Type
         query_type = "UNKNOWN"
         if isinstance(expression, exp.Select):
             query_type = "SELECT"
@@ -89,50 +94,126 @@ class SQLValidator:
         elif isinstance(expression, exp.Alter):
             query_type = "ALTER"
         else:
-            # Check string keyword fallback
             first_word = trimmed.split()[0].upper()
             if first_word in ["WITH", "EXPLAIN"]:
                 query_type = "SELECT"
             else:
                 query_type = first_word
 
-        # Check for dangerous functions / commands
+        # 4. Check for dangerous administrative commands and injection patterns
         lowered = trimmed.lower()
         for dangerous in cls.DANGEROUS_COMMANDS:
             if re.search(r'\b' + re.escape(dangerous) + r'\b', lowered):
                 return {
                     "is_valid": False,
-                    "error": f"Forbidden command or function detected: '{dangerous}'",
+                    "error": f"Security Violation: Forbidden command or function detected: '{dangerous}'",
                     "query_type": "FORBIDDEN"
                 }
 
-        # Extract Tables
+        # 5. Extract CTE Names (they act as valid local table aliases, not external tables)
+        cte_names = set()
+        for cte in expression.find_all(exp.CTE):
+            if cte.alias:
+                cte_names.add(cte.alias.lower())
+
+        # 6. Extract Tables and Table Aliases
         tables = set()
+        table_alias_map = {}
         for table in expression.find_all(exp.Table):
             table_name = table.name.lower()
             if table_name:
                 tables.add(table_name)
+                if table.alias:
+                    table_alias_map[table.alias.lower()] = table_name
 
-        # Extract Columns
+        # Also catch subquery aliases
+        for subq in expression.find_all(exp.Subquery):
+            if subq.alias:
+                cte_names.add(subq.alias.lower())
+
+        # 7. Extract SELECT Column Aliases (e.g. SELECT x AS my_alias)
+        select_aliases = set()
+        for s in expression.find_all(exp.Select):
+            for exp_item in s.expressions:
+                if isinstance(exp_item, exp.Alias):
+                    select_aliases.add(exp_item.alias.lower())
+
+        # 8. Extract Referenced Columns
         columns = set()
         for col in expression.find_all(exp.Column):
             col_name = col.name.lower()
             if col_name and col_name != "*":
                 columns.add(col_name)
 
-        # Check allowed tables if provided
+        # 9. Schema Validation against allowed_tables
+        actual_referenced_tables = tables - cte_names
+        effective_allowed = None
         if allowed_tables:
-            allowed_lowered = {t.lower() for t in allowed_tables}
-            unauthorized = tables - allowed_lowered
+            effective_allowed = {t.lower() for t in allowed_tables}
+        elif schema_context and "tables" in schema_context:
+            effective_allowed = {t.lower() for t in schema_context["tables"].keys()}
+
+        if effective_allowed:
+            unauthorized = actual_referenced_tables - effective_allowed
             if unauthorized:
                 return {
                     "is_valid": False,
-                    "error": f"Query references tables not in current project schema: {', '.join(unauthorized)}",
+                    "error": f"Schema Validation Error: Query references non-existent table(s): {', '.join(sorted(unauthorized))}",
                     "query_type": query_type,
-                    "unauthorized_tables": list(unauthorized)
+                    "unauthorized_tables": list(unauthorized),
+                    "tables": sorted(list(tables)),
+                    "columns": sorted(list(columns))
                 }
 
-        # Determine confirmation requirements
+        # 10. Column Validation against Schema Context
+        if schema_context and "tables" in schema_context and schema_context["tables"]:
+            schema_cols: Dict[str, Set[str]] = {}
+            for t_name, c_list in schema_context["tables"].items():
+                col_set = set()
+                for c in c_list:
+                    if isinstance(c, dict):
+                        col_set.add(c.get("name", "").lower())
+                    else:
+                        col_set.add(str(c).lower())
+                schema_cols[t_name.lower()] = col_set
+
+            missing_columns = []
+            for col in expression.find_all(exp.Column):
+                c_name = col.name.lower()
+                if c_name == "*" or c_name in select_aliases or c_name in cte_names:
+                    continue
+
+                t_qualifier = col.table.lower() if col.table else None
+                if t_qualifier:
+                    if t_qualifier in cte_names:
+                        continue  # Column on a CTE result set
+                    real_table = table_alias_map.get(t_qualifier, t_qualifier)
+                    if real_table in schema_cols:
+                        if c_name not in schema_cols[real_table]:
+                            missing_columns.append(f"{c_name} (in table '{real_table}')")
+                else:
+                    # Unqualified column: must belong to at least one referenced real table or CTE
+                    found = False
+                    for t in actual_referenced_tables:
+                        if t in schema_cols and c_name in schema_cols[t]:
+                            found = True
+                            break
+                    if not found and not any(c_name in cte_names for cte in cte_names):
+                        # Special check: check if it matches a SQL window function or function name
+                        if not isinstance(col.parent, (exp.Anonymous, exp.Func)):
+                            missing_columns.append(c_name)
+
+            if missing_columns:
+                return {
+                    "is_valid": False,
+                    "error": f"Schema Validation Error: Query references non-existent column(s): {', '.join(sorted(set(missing_columns)))}",
+                    "query_type": query_type,
+                    "missing_columns": sorted(list(set(missing_columns))),
+                    "tables": sorted(list(tables)),
+                    "columns": sorted(list(columns))
+                }
+
+        # 11. Determine Confirmation Requirements
         requires_confirmation = False
         confirmation_reason = None
 
@@ -143,7 +224,6 @@ class SQLValidator:
             requires_confirmation = True
             confirmation_reason = f"{query_type} statement modifies database records and requires confirmation."
 
-        # Count JOINs for complexity
         join_count = len(list(expression.find_all(exp.Join)))
 
         return {

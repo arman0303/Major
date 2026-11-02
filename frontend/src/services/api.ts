@@ -139,6 +139,9 @@ export const api = {
   indexDocument: (body: { fileId?: string; projectId: string; content?: string; chunks?: any[]; metadata?: any }) =>
     request<{ indexed: boolean; chunks_indexed: number }>('/ai/index-document', { method: 'POST', body: JSON.stringify(body) }),
 
+  // ── System ──
+  getSystemStatus: () => request<{ database_mode: string; status: string }>('/system/status'),
+
   // ── Dashboards ──
   listDashboards: (projectId: string) => request<{ dashboards: Dashboard[] }>(`/dashboards?projectId=${projectId}`),
   createDashboard: (body: { projectId: string; title: string; description?: string }) => request<{ dashboard: Dashboard }>('/dashboards', { method: 'POST', body: JSON.stringify(body) }),

@@ -119,7 +119,16 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
   try {
     const userId = req.user!.id;
 
-    // 1. Verify conversation belongs to this user's project (and user when user_id column exists)
+    // 1. Verify project and conversation belong to this user
+    const projectCheck = await DatabaseManager.query(
+      'SELECT id FROM projects WHERE id = $1 AND (user_id = $2 OR user_id IS NULL)',
+      [projectId, userId]
+    );
+    if (projectCheck.rows.length === 0) {
+      res.status(403).json({ error: 'Project not found or access denied' });
+      return;
+    }
+
     const convCheck = await DatabaseManager.query(
       'SELECT id FROM conversations WHERE id = $1 AND project_id = $2 AND (user_id = $3 OR user_id IS NULL)',
       [conversationId, projectId, userId]
@@ -202,33 +211,63 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
     let executionError: string | null = null;
     let answerText = aiResponse.answer || aiResponse.explanation || `Processed ${intent} request.`;
 
+    // Helper: Enforce full AST, security, schema, and read-only validation
+    const validateAndSanitizeQuery = (sqlToValidate: string): { isValid: boolean; safeSql?: string; error?: string } => {
+      const trimmed = sqlToValidate.trim();
+      if (!trimmed) {
+        return { isValid: false, error: 'Query is empty' };
+      }
+
+      // Security Check A: Reject multiple statements
+      const statements = trimmed.split(';').map((s: string) => s.trim()).filter(Boolean);
+      if (statements.length > 1) {
+        return { isValid: false, error: 'Security Violation: Multiple SQL statements in a single execution are prohibited.' };
+      }
+
+      // Security Check B: Block dangerous administrative commands and functions
+      const dangerousPatterns = ['pg_sleep', 'pg_read_file', 'pg_write_file', 'copy ', 'grant ', 'revoke ', 'drop role', 'alter system', 'pg_terminate_backend'];
+      if (dangerousPatterns.some(d => trimmed.toLowerCase().includes(d))) {
+        return { isValid: false, error: 'Security Violation: Execution of privileged administrative SQL commands is strictly blocked.' };
+      }
+
+      // Security Check C: Enforce read-only restriction for automatic execution
+      const upper = trimmed.toUpperCase();
+      if (!upper.startsWith('SELECT') && !upper.startsWith('WITH')) {
+        return { isValid: false, error: 'Automatic execution is strictly restricted to read-only SELECT queries.' };
+      }
+
+      // Schema Check D: Verify referenced tables and columns exist in active project schema
+      const schemaCheck = SchemaService.verifySQLAgainstSchema(trimmed, schemaContext);
+      if (!schemaCheck.valid) {
+        const errors: string[] = [];
+        if (schemaCheck.missingTables.length > 0) {
+          errors.push(`non-existent table(s): ${schemaCheck.missingTables.join(', ')}`);
+        }
+        if (schemaCheck.missingColumns.length > 0) {
+          errors.push(`non-existent column(s): ${schemaCheck.missingColumns.join(', ')}`);
+        }
+        return { isValid: false, error: `Schema Validation Error: Query references ${errors.join('; ')}.` };
+      }
+
+      // Apply row limit if not present
+      let safeSql = trimmed;
+      if (!upper.includes('LIMIT')) {
+        safeSql = `${trimmed.replace(/;$/, '')} LIMIT ${config.querySafety.maxRowLimit};`;
+      }
+
+      return { isValid: true, safeSql };
+    };
+
     // 7. Security Validation, Schema Verification, and Automated Execution for Safe SELECT Queries
     if (!requiresConfirmation && queryType === 'SELECT' && generatedSql) {
-      // Security Check A: Reject multi-statement queries
-      const statements = generatedSql.split(';').map((s: string) => s.trim()).filter(Boolean);
-      if (statements.length > 1) {
-        executionError = 'Security Violation: Multiple SQL statements in a single execution are prohibited.';
-      }
-
-      // Security Check B: Block dangerous / administrative commands
-      const dangerousPatterns = ['pg_sleep', 'pg_read_file', 'pg_write_file', 'copy ', 'grant ', 'revoke ', 'drop role', 'alter system', 'pg_terminate_backend'];
-      if (!executionError && dangerousPatterns.some(d => generatedSql.toLowerCase().includes(d))) {
-        executionError = 'Security Violation: Execution of privileged administrative SQL commands is strictly blocked.';
-      }
-
-      // Schema Check C: Verify referenced tables exist in project schema
-      if (!executionError) {
-        const schemaCheck = SchemaService.verifySQLAgainstSchema(generatedSql, schemaContext);
-        if (!schemaCheck.valid) {
-          executionError = `Schema Validation Error: Query references non-existent table(s): ${schemaCheck.missingTables.join(', ')}.`;
-        }
-      }
-
-      // Only execute if all validations pass
-      if (!executionError) {
+      const validation = validateAndSanitizeQuery(generatedSql);
+      if (!validation.isValid) {
+        executionError = validation.error || 'SQL validation failed';
+      } else {
+        const sqlToExecute = validation.safeSql!;
         const startExec = Date.now();
         try {
-          const dbRes = await DatabaseManager.query(generatedSql);
+          const dbRes = await DatabaseManager.query(sqlToExecute, undefined, { isAnalyticalQuery: true });
           executionDuration = Date.now() - startExec;
           const columns = dbRes.rows.length > 0 ? Object.keys(dbRes.rows[0]) : [];
 
@@ -242,7 +281,7 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
           try {
             const synthRes = await axios.post(`${config.aiServiceUrl}/api/ai/synthesize-answer`, {
               question: message,
-              sql: generatedSql,
+              sql: sqlToExecute,
               rows: dbRes.rows.slice(0, 30),
               columns,
               row_count: dbRes.rowCount,
@@ -281,26 +320,28 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
                 provider,
                 api_key: apiKey,
               }, { timeout: 10000 });
+
               if (correctRes.data?.corrected_sql) {
                 const correctedSql = correctRes.data.corrected_sql;
-                // Re-verify corrected query against schema and security checks
-                const correctedCheck = SchemaService.verifySQLAgainstSchema(correctedSql, schemaContext);
-                if (correctedCheck.valid) {
-                  const fixedRes = await DatabaseManager.query(correctedSql);
+                // Re-verify corrected query with the EXACT SAME rigorous validation pipeline
+                const correctedValidation = validateAndSanitizeQuery(correctedSql);
+                if (correctedValidation.isValid) {
+                  const fixedSql = correctedValidation.safeSql!;
+                  const fixedRes = await DatabaseManager.query(fixedSql, undefined, { isAnalyticalQuery: true });
                   const fixedColumns = fixedRes.rows.length > 0 ? Object.keys(fixedRes.rows[0]) : [];
                   queryResult = {
                     records: fixedRes.rows,
                     columns: fixedColumns,
                     row_count: fixedRes.rowCount,
                   };
-                  aiResponse.generated_sql = correctedSql;
+                  aiResponse.generated_sql = fixedSql;
                   executionError = null;
 
                   // Post-execution synthesis on corrected query result
                   try {
                     const synthRes = await axios.post(`${config.aiServiceUrl}/api/ai/synthesize-answer`, {
                       question: message,
-                      sql: correctedSql,
+                      sql: fixedSql,
                       rows: fixedRes.rows.slice(0, 30),
                       columns: fixedColumns,
                       row_count: fixedRes.rowCount,
@@ -311,6 +352,8 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
                       answerText = synthRes.data.synthesized_answer;
                     }
                   } catch {}
+                } else {
+                  console.warn('Corrected query failed validation:', correctedValidation.error);
                 }
               }
             } catch { /* auto-correct failed */ }

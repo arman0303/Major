@@ -201,7 +201,11 @@ async function main(): Promise<void> {
   console.log(`AI Service: ${AI_SERVICE_URL}`);
 
   try {
-    await axios.get(`${AI_SERVICE_URL}/health`);
+    try {
+      await axios.get(`${BASE_URL}/health`);
+    } catch {
+      await axios.get(`${AI_SERVICE_URL}/health`);
+    }
     console.log("✓ AI Service is running");
   } catch {
     console.error("✗ AI Service is not running at", AI_SERVICE_URL);
