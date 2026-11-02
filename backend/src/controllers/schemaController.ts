@@ -31,7 +31,26 @@ export const generateSchema = async (req: AuthenticatedRequest, res: Response): 
   }
 
   try {
-    const aiRes = await axios.post(`${config.aiServiceUrl}/api/ai/generate-schema`, { prompt });
+    const userId = req.user?.id;
+    let provider = 'gemini';
+    let apiKey = null;
+    if (userId) {
+      try {
+        const userSettings = await DatabaseManager.query(
+          'SELECT default_llm_provider, gemini_api_key, openai_api_key FROM user_settings WHERE user_id = $1',
+          [userId]
+        );
+        const s = userSettings.rows[0] || {};
+        provider = s.default_llm_provider || 'gemini';
+        apiKey = provider === 'gemini' ? s.gemini_api_key : s.openai_api_key;
+      } catch { /* use defaults */ }
+    }
+
+    const aiRes = await axios.post(`${config.aiServiceUrl}/api/ai/generate-schema`, {
+      prompt,
+      provider,
+      api_key: apiKey,
+    });
     res.json(aiRes.data);
   } catch (err: any) {
     res.status(500).json({ error: `Schema generation failed: ${err.message}` });

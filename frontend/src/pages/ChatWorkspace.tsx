@@ -185,7 +185,7 @@ export const ChatWorkspace: React.FC = () => {
 
     try {
       const res = await api.uploadDataset(formData);
-      const isDoc = file.name.endsWith('.pdf') || file.name.endsWith('.txt');
+      const isDoc = file.name.endsWith('.pdf') || file.name.endsWith('.txt') || file.name.endsWith('.docx');
       const uploadNotice: Message = {
         id: `upload_${Date.now()}`,
         conversation_id: targetConv?.id || '',
@@ -608,7 +608,7 @@ export const ChatWorkspace: React.FC = () => {
                 type="file"
                 ref={fileInputRef}
                 onChange={handleFileUpload}
-                accept=".csv,.json,.pdf,.txt"
+                accept=".csv,.json,.pdf,.txt,.docx"
                 className="hidden"
               />
               <button
@@ -616,7 +616,7 @@ export const ChatWorkspace: React.FC = () => {
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isUploading || isLoading}
                 className="p-2 rounded-xl text-muted-foreground hover:text-foreground hover:bg-muted transition-colors disabled:opacity-50 shrink-0"
-                title="Upload Dataset (CSV, JSON, PDF, TXT)"
+                title="Upload Dataset (CSV, JSON, PDF, TXT, DOCX)"
               >
                 {isUploading ? <Loader2 className="w-4 h-4 animate-spin text-primary" /> : <Paperclip className="w-4 h-4" />}
               </button>

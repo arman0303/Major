@@ -90,8 +90,8 @@ export const SettingsPage: React.FC = () => {
                 onChange={e => setProvider(e.target.value as any)}
                 className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-xs text-foreground focus:outline-none"
               >
-                <option value="gemini">Google Gemini (Gemini 1.5 Flash)</option>
-                <option value="openai">OpenAI (GPT-4o Mini)</option>
+                <option value="gemini">Google Gemini (Gemini 3.8 Flash)</option>
+                <option value="openai">OpenAI (GPT-4o)</option>
               </select>
             </label>
 

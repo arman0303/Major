@@ -86,6 +86,26 @@ export const executeSQL = async (req: AuthenticatedRequest, res: Response): Prom
   const { projectId, sql, isConfirmed, limit } = executeSqlSchema.parse(req.body);
   const userId = req.user!.id;
 
+  // Security Check A: Reject multi-statement queries
+  const statements = sql.split(';').map((s: string) => s.trim()).filter(Boolean);
+  if (statements.length > 1) {
+    res.status(400).json({
+      status: 'error',
+      error: 'Security Violation: Multiple SQL statements in a single execution are prohibited.',
+    });
+    return;
+  }
+
+  // Security Check B: Block dangerous administrative commands
+  const dangerousPatterns = ['pg_sleep', 'pg_read_file', 'pg_write_file', 'copy ', 'grant ', 'revoke ', 'drop role', 'alter system', 'pg_terminate_backend'];
+  if (dangerousPatterns.some(d => sql.toLowerCase().includes(d))) {
+    res.status(400).json({
+      status: 'error',
+      error: 'Security Violation: Execution of privileged administrative SQL commands is strictly blocked.',
+    });
+    return;
+  }
+
   const upper = sql.trim().toUpperCase();
   const isSelect = upper.startsWith('SELECT') || upper.startsWith('WITH');
   const isMutation = upper.startsWith('INSERT') || upper.startsWith('UPDATE') || upper.startsWith('DELETE') || upper.startsWith('DROP');
