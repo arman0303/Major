@@ -74,16 +74,31 @@ class SQLGenerator:
                 f"{r.get('target_table')}.{r.get('target_column')}"
             )
 
+        history_repr = "None"
+        if conversation_history:
+            history_repr = "\n".join(
+                f"- {m.get('role', 'user').upper()}: {m.get('content', '')[:180]}"
+                for m in conversation_history[-6:] if m.get("content")
+            )
+
         prompt = f"""Database Schema:
 {chr(10).join(schema_repr)}
 
 Table Relationships:
 {chr(10).join(rel_repr) if rel_repr else "No explicit foreign keys."}
 
-Previous Context/SQL:
+Recent Conversation History:
+{history_repr}
+
+Previous Executed SQL:
 {previous_sql if previous_sql else "None"}
 
 User Question: {question}
+
+Context-Aware Guidelines:
+- If this is a follow-up question (e.g. "Which region performed best?", "Show only the top three", "Filter by that department"), reference the previous executed SQL and recent conversation history to refine or extend the analysis.
+- Generate valid PostgreSQL query syntax.
+- Formulate necessary JOINs, CTEs, or window functions where appropriate.
 
 Return a JSON object with:
 {{

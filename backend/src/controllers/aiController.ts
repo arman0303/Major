@@ -197,34 +197,18 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
       });
       aiResponse = aiRes.data;
     } catch (aiErr: any) {
-      console.warn('AI service unavailable, using deterministic fallback:', aiErr.message);
-      // Deterministic fallback: generate SQL directly
-      try {
-        const sqlRes = await axios.post(`${config.aiServiceUrl}/api/ai/generate-sql`, {
-          question: message,
-          schema_context: { tables: schemaContext },
-          conversation_history: conversationHistory,
-          previous_sql: previousSql,
-          provider,
-          api_key: apiKey,
-        }, { timeout: 15000 });
-        aiResponse = {
-          intent: 'sql_analytics',
-          response_type: 'sql_analytics',
-          answer: sqlRes.data.explanation || 'Query generated.',
-          ...sqlRes.data,
-        };
-      } catch (sqlErr: any) {
-        aiResponse = {
-          intent: 'sql_analytics',
-          response_type: 'sql_analytics',
-          answer: 'AI service is temporarily unavailable. Showing sample data.',
-          generated_sql: 'SELECT * FROM employees LIMIT 20;',
-          query_type: 'SELECT',
-          explanation: 'AI service is temporarily unavailable.',
-          requires_confirmation: false,
-        };
-      }
+      console.warn('AI chat service error:', aiErr.message);
+      const isConnectionError = aiErr.code === 'ECONNREFUSED' || aiErr.message?.includes('ECONNREFUSED');
+      const errorMsg = isConnectionError
+        ? `The AI microservice (${config.aiServiceUrl}) is currently unreachable. Please ensure the Python service is running ('uvicorn app.main:app --port 8000').`
+        : `AI Service Error: ${aiErr.response?.data?.detail || aiErr.message}`;
+
+      res.status(502).json({
+        error: errorMsg,
+        service: 'ai-service',
+        status: 'unavailable'
+      });
+      return;
     }
 
     const intent = aiResponse.intent || 'sql_analytics';
@@ -240,56 +224,71 @@ export const handleAIChat = async (req: AuthenticatedRequest, res: Response): Pr
     let vizConfig: any = aiResponse.visualization_recommendation || null;
     let executionError: string | null = null;
 
-    // 7. Execute SELECT queries automatically
+    // 7. Security Validation and Automated Execution for Safe SELECT Queries
     if (!requiresConfirmation && queryType === 'SELECT' && generatedSql) {
-      const startExec = Date.now();
-      try {
-        const dbRes = await DatabaseManager.query(generatedSql);
-        executionDuration = Date.now() - startExec;
-        const columns = dbRes.rows.length > 0 ? Object.keys(dbRes.rows[0]) : [];
+      // Security Check A: Reject multi-statement queries
+      const statements = generatedSql.split(';').map((s: string) => s.trim()).filter(Boolean);
+      if (statements.length > 1) {
+        executionError = 'Security Violation: Multiple SQL statements in a single execution are prohibited.';
+      }
 
-        queryResult = {
-          records: dbRes.rows,
-          columns,
-          row_count: dbRes.rowCount,
-        };
+      // Security Check B: Block dangerous / administrative commands
+      const dangerousPatterns = ['pg_sleep', 'pg_read_file', 'pg_write_file', 'copy ', 'grant ', 'revoke ', 'drop role', 'alter system', 'pg_terminate_backend'];
+      if (!executionError && dangerousPatterns.some(d => generatedSql.toLowerCase().includes(d))) {
+        executionError = 'Security Violation: Execution of privileged administrative SQL commands is strictly blocked.';
+      }
 
-        // Get chart recommendation if not provided
-        if (!vizConfig && dbRes.rows.length > 0) {
-          try {
-            const chartRes = await axios.post(`${config.aiServiceUrl}/api/ai/suggest-chart`, {
-              rows: dbRes.rows.slice(0, 100),
-              columns,
-              query_intent: intent,
-            }, { timeout: 5000 });
-            vizConfig = chartRes.data;
-          } catch {
-            vizConfig = { chart_type: 'table' };
-          }
-        }
-      } catch (execErr: any) {
-        executionError = execErr.message;
-        // Attempt auto-correction
-        if (apiKey) {
-          try {
-            const correctRes = await axios.post(`${config.aiServiceUrl}/api/ai/correct-sql`, {
-              failed_sql: generatedSql,
-              error_message: execErr.message,
-              schema_context: { tables: schemaContext },
-              provider,
-              api_key: apiKey,
-            }, { timeout: 10000 });
-            if (correctRes.data?.corrected_sql) {
-              const fixedRes = await DatabaseManager.query(correctRes.data.corrected_sql);
-              queryResult = {
-                records: fixedRes.rows,
-                columns: fixedRes.rows.length > 0 ? Object.keys(fixedRes.rows[0]) : [],
-                row_count: fixedRes.rowCount,
-              };
-              aiResponse.generated_sql = correctRes.data.corrected_sql;
-              executionError = null;
+      // Only execute if all security validations pass
+      if (!executionError) {
+        const startExec = Date.now();
+        try {
+          const dbRes = await DatabaseManager.query(generatedSql);
+          executionDuration = Date.now() - startExec;
+          const columns = dbRes.rows.length > 0 ? Object.keys(dbRes.rows[0]) : [];
+
+          queryResult = {
+            records: dbRes.rows,
+            columns,
+            row_count: dbRes.rowCount,
+          };
+
+          // Get chart recommendation if not provided
+          if (!vizConfig && dbRes.rows.length > 0) {
+            try {
+              const chartRes = await axios.post(`${config.aiServiceUrl}/api/ai/suggest-chart`, {
+                rows: dbRes.rows.slice(0, 100),
+                columns,
+                query_intent: intent,
+              }, { timeout: 5000 });
+              vizConfig = chartRes.data;
+            } catch {
+              vizConfig = { chart_type: 'table' };
             }
-          } catch { /* auto-correct failed */ }
+          }
+        } catch (execErr: any) {
+          executionError = execErr.message;
+          // Attempt auto-correction with real LLM
+          if (apiKey) {
+            try {
+              const correctRes = await axios.post(`${config.aiServiceUrl}/api/ai/correct-sql`, {
+                failed_sql: generatedSql,
+                error_message: execErr.message,
+                schema_context: { tables: schemaContext },
+                provider,
+                api_key: apiKey,
+              }, { timeout: 10000 });
+              if (correctRes.data?.corrected_sql) {
+                const fixedRes = await DatabaseManager.query(correctRes.data.corrected_sql);
+                queryResult = {
+                  records: fixedRes.rows,
+                  columns: fixedRes.rows.length > 0 ? Object.keys(fixedRes.rows[0]) : [],
+                  row_count: fixedRes.rowCount,
+                };
+                aiResponse.generated_sql = correctRes.data.corrected_sql;
+                executionError = null;
+              }
+            } catch { /* auto-correct failed */ }
+          }
         }
       }
     }

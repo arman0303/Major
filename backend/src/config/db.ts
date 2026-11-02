@@ -297,18 +297,23 @@ export class DatabaseManager {
           if (upper.includes('DEPARTMENT_ID IS NULL')) {
             rows = rows.filter(r => r.department_id === null || r.department_id === undefined);
           }
-          if (upper.includes('USER_ID =')) {
-            const userMatch = upper.match(/USER_ID\s*=\s*'([^']+)'/);
-            if (userMatch) {
-              const uId = userMatch[1].toLowerCase();
-              rows = rows.filter(r => (r.user_id || '').toLowerCase() === uId);
-            }
-          }
           if (upper.includes('DEPARTMENT_ID = 1')) {
             rows = rows.filter(r => r.department_id === 1);
           }
 
-          // Match parameterized clauses like col = $1, col = $2
+          // 1. Match literal equals: col = 'value'
+          const literalMatches = [...trimmed.matchAll(/([a-zA-Z0-9_]+)\s*=\s*'([^']*)'/g)];
+          for (const lm of literalMatches) {
+            const col = lm[1].toLowerCase();
+            const val = lm[2];
+            rows = rows.filter(r => {
+              const rVal = r[col];
+              if (rVal === undefined || rVal === null) return false;
+              return String(rVal).toLowerCase() === val.toLowerCase();
+            });
+          }
+
+          // 2. Match parameterized equals: col = $1, col = $2
           if (params && params.length > 0) {
             const paramMatches = [...trimmed.matchAll(/([a-zA-Z0-9_]+)\s*=\s*\$(\d+)/g)];
             for (const pm of paramMatches) {
@@ -323,6 +328,32 @@ export class DatabaseManager {
                 });
               }
             }
+
+            // 3. Match parameterized LIKE: col LIKE $1, col ILIKE $2
+            const likeParamMatches = [...trimmed.matchAll(/([a-zA-Z0-9_]+)\s+(?:I)?LIKE\s+\$(\d+)/gi)];
+            for (const lpm of likeParamMatches) {
+              const col = lpm[1].toLowerCase();
+              const pIdx = parseInt(lpm[2], 10) - 1;
+              const val = params[pIdx];
+              if (typeof val === 'string') {
+                const pat = val.replace(/^%/, '').replace(/%$/, '').toLowerCase();
+                rows = rows.filter(r => {
+                  const rVal = String(r[col] || '').toLowerCase();
+                  return rVal.includes(pat);
+                });
+              }
+            }
+          }
+
+          // 4. Match literal LIKE: col LIKE '%value%'
+          const likeLiteralMatches = [...trimmed.matchAll(/([a-zA-Z0-9_]+)\s+(?:I)?LIKE\s+'%?([^'%]*)%?'/gi)];
+          for (const llm of likeLiteralMatches) {
+            const col = llm[1].toLowerCase();
+            const pat = llm[2].toLowerCase();
+            rows = rows.filter(r => {
+              const rVal = String(r[col] || '').toLowerCase();
+              return rVal.includes(pat);
+            });
           }
         }
 
@@ -360,20 +391,37 @@ export class DatabaseManager {
         const table = match[1].toLowerCase();
         const records = this.getTableData(table);
         const colList = match[2] ? match[2].split(',').map(c => c.trim().toLowerCase()) : [];
+
+        // Support both parameterized ($1, $2) and inline literal VALUES ('a', 'b')
+        const valMatch = trimmed.match(/VALUES\s*\(([^)]+)\)/i);
+        let extractedValues: any[] = params && params.length > 0 ? params : [];
+        if (extractedValues.length === 0 && valMatch) {
+          extractedValues = valMatch[1].split(',').map(v => {
+            const tv = v.trim();
+            if ((tv.startsWith("'") && tv.endsWith("'")) || (tv.startsWith('"') && tv.endsWith('"'))) {
+              return tv.slice(1, -1);
+            }
+            if (!isNaN(Number(tv))) return Number(tv);
+            return tv;
+          });
+        }
+
         const newRecord: any = {
-          id: (params && params[0] && typeof params[0] === 'string' && params[0].startsWith('ds_')) ? params[0] : (records.length + 1),
+          id: (extractedValues && extractedValues[0] && typeof extractedValues[0] === 'string' && (extractedValues[0].startsWith('ds_') || extractedValues[0].startsWith('conv_') || extractedValues[0].startsWith('chunk_') || extractedValues[0].startsWith('msg_'))) 
+            ? extractedValues[0] 
+            : (records.length + 1),
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         };
 
-        if (colList.length > 0 && params && params.length > 0) {
+        if (colList.length > 0 && extractedValues.length > 0) {
           colList.forEach((col, idx) => {
-            if (idx < params.length) {
-              newRecord[col] = params[idx];
+            if (idx < extractedValues.length) {
+              newRecord[col] = extractedValues[idx];
             }
           });
-        } else if (params && params.length > 0) {
-          newRecord.data = params;
+        } else if (extractedValues.length > 0) {
+          newRecord.data = extractedValues;
         }
 
         // Handle conflict or unique ID

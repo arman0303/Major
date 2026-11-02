@@ -135,6 +135,7 @@ def unified_chat(req: ChatRequest):
         message=req.message,
         has_uploaded_docs=req.has_uploaded_docs or False,
         conversation_history=req.conversation_history,
+        schema_context=req.schema_context,
     )
     intent = classification["intent"]
 

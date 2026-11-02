@@ -515,18 +515,23 @@ export const ChatWorkspace: React.FC = () => {
 
                         {/* Document Source Citations */}
                         {!isUser && (msg as any).document_sources?.length > 0 && (
-                          <div className="mt-2.5 pt-2 border-t border-border/50 flex flex-wrap gap-1.5">
-                            <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Citations:</span>
-                            {((msg as any).document_sources as DocumentSource[]).map((src, i) => (
-                              <span
-                                key={i}
-                                className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-muted-foreground border border-border flex items-center gap-1"
-                              >
-                                <FileText className="w-2.5 h-2.5" />
-                                {src.metadata?.source || 'Doc'}
-                                {src.metadata?.page_number && ` (p. ${src.metadata.page_number})`}
-                              </span>
-                            ))}
+                          <div className="mt-2.5 pt-2 border-t border-border/50 flex flex-wrap items-center gap-1.5">
+                            <span className="text-[10px] text-muted-foreground font-semibold uppercase tracking-wider">Citations:</span>
+                            {((msg as any).document_sources as any[]).map((src, i) => {
+                              const docName = src.document_name || src.metadata?.source || src.metadata?.original_name || 'Document';
+                              const page = src.page_number || src.metadata?.page_number;
+                              return (
+                                <span
+                                  key={i}
+                                  className="text-[10px] px-2 py-0.5 rounded-md bg-muted text-foreground border border-border/80 flex items-center gap-1 shadow-2xs"
+                                  title={src.content_preview || src.content || ''}
+                                >
+                                  <FileText className="w-2.5 h-2.5 text-blue-500 shrink-0" />
+                                  <span className="font-medium">{docName}</span>
+                                  {page && <span className="text-primary font-mono text-[9px]">(p. {page})</span>}
+                                </span>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

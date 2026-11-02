@@ -1,224 +1,178 @@
 """
-Intent Router — classifies user input into one of 8 intent categories
-and routes to the appropriate handler.
+Intent Router — dynamically classifies user input into one of 8 intent categories
+using LLM-driven reasoning with structured outputs, conversation context, and schema awareness.
 
 Intent Categories:
-  1. sql_analytics      — Database questions, analytics, reporting
-  2. document_qa        — Questions about uploaded PDFs/docs
-  3. hybrid             — Requires both DB data and document content
-  4. general_knowledge  — Conceptual / educational questions
-  5. greeting           — Greetings, small talk
-  6. schema_management  — Create/alter DB tables using natural language
-  7. data_modification  — INSERT/UPDATE/DELETE requests
-  8. ambiguous          — Unclear; needs clarification
+  1. sql_analytics      — Querying, aggregating, filtering, or reporting from database tables
+  2. document_qa        — Questions about uploaded PDFs/docs, summaries, methodology, citations
+  3. hybrid             — Requires BOTH database data AND uploaded document content
+  4. general_knowledge  — Conceptual / educational / architecture questions
+  5. greeting           — Greetings, small talk, pleasantries
+  6. schema_management  — Create / alter / design database tables using natural language
+  7. data_modification  — Requests to INSERT / UPDATE / DELETE data in tables
+  8. ambiguous          — Unclear, incomplete, or requires clarification
 """
 
 import re
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from ..llm.provider import LLMProvider
 
-# ── Keywords that strongly indicate SQL / analytics intent ──────────────────
-SQL_KEYWORDS = {
-    "show", "find", "list", "get", "fetch", "display", "give me",
-    "count", "sum", "total", "average", "avg", "max", "min",
-    "how many", "how much", "which", "who", "top", "bottom",
-    "rank", "compare", "trend", "group", "aggregate",
-    "employee", "employees", "department", "departments",
-    "salary", "salaries", "project", "projects", "sales",
-    "revenue", "orders", "customer", "customers", "region",
-    "hire", "hired", "joining", "performance",
-    "join", "inner join", "left join", "where", "having",
-    "select", "query", "database", "table", "row", "record",
-    "more than", "less than", "greater", "between", "filter",
+VALID_INTENTS = {
+    "sql_analytics",
+    "document_qa",
+    "hybrid",
+    "general_knowledge",
+    "greeting",
+    "schema_management",
+    "data_modification",
+    "ambiguous",
 }
 
-# ── Keywords for document / PDF questions ────────────────────────────────────
-DOC_KEYWORDS = {
-    "document", "pdf", "file", "uploaded", "paper", "report",
-    "article", "text", "page", "paragraph", "section", "chapter",
-    "summarize", "summary", "explain the", "according to", "in the document",
-    "the paper", "the report", "the article", "the file", "mentions",
-    "states", "says", "referenced", "cited",
-}
-
-# ── Keywords for schema management ───────────────────────────────────────────
-SCHEMA_KEYWORDS = {
-    "create table", "create a table", "create database", "alter table",
-    "add column", "drop column", "new table", "make a table",
-    "design schema", "design a schema", "build schema",
-    "schema for", "define a table", "set up a table",
-}
-
-# ── Keywords for data modification ───────────────────────────────────────────
-MUTATION_KEYWORDS = {
-    "insert", "add a record", "add new", "update", "delete", "remove",
-    "change the value", "modify", "set salary", "set the", "drop table",
-    "truncate", "bulk insert",
-}
-
-# ── Greeting / small talk ─────────────────────────────────────────────────────
-GREETING_PATTERNS = [
-    r"^\s*(hi|hello|hey|good (morning|afternoon|evening)|howdy|sup)\b",
-    r"^\s*how are you",
-    r"^\s*what('?s| is) your name",
-    r"^\s*who are you",
-    r"^\s*thanks?\.?\s*$",
-    r"^\s*thank you\.?\s*$",
-]
-
-# ── Conceptual / general knowledge ──────────────────────────────────────────
-CONCEPTUAL_KEYWORDS = {
-    "what is", "what are", "explain", "describe", "how does",
-    "why does", "difference between", "definition of",
-    "how do", "what does", "tell me about", "can you explain",
-    "what's the difference", "when should", "pros and cons",
-}
+# Fast pattern for trivial standalone greetings only (saves LLM tokens for simple "hi")
+TRIVIAL_GREETING_PATTERN = re.compile(r"^\s*(hi|hello|hey|good\s+(morning|afternoon|evening)|thank\s+you|thanks)\s*[\.!]?\s*$", re.IGNORECASE)
 
 
 class IntentRouter:
     """
-    Classifies user messages and routes them to the correct handler.
-    Uses a fast keyword-based pre-classifier first, then optionally
-    calls the LLM for ambiguous cases when an API key is available.
+    LLM-driven intent classifier with structured JSON outputs and conversation context.
+    Falls back to heuristics only when no API key is configured.
     """
 
     def __init__(self, provider: Optional[LLMProvider] = None):
-        self.provider = provider
+        self.provider = provider or LLMProvider()
 
     def classify(
         self,
         message: str,
         has_uploaded_docs: bool = False,
-        conversation_history: Optional[List[Dict]] = None,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        schema_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Returns:
-        {
-          "intent": "sql_analytics" | "document_qa" | "hybrid" |
-                    "general_knowledge" | "greeting" | "schema_management" |
-                    "data_modification" | "ambiguous",
-          "confidence": 0.0–1.0,
-          "method": "keyword" | "llm",
-          "reasoning": "brief explanation"
-        }
+        Classifies user intent using LLM reasoning (primary) or deterministic fallback.
         """
-        msg_lower = message.lower().strip()
+        cleaned = message.strip()
+        if not cleaned:
+            return self._result("ambiguous", 0.99, "rule", "Empty message")
 
-        # 1. Greeting check (fastest)
-        for pattern in GREETING_PATTERNS:
-            if re.search(pattern, msg_lower):
-                return self._result("greeting", 0.95, "keyword", "Matches greeting pattern")
+        # 1. Quick check for trivial single-word greetings to save LLM tokens
+        if TRIVIAL_GREETING_PATTERN.match(cleaned):
+            return self._result("greeting", 0.98, "pattern", "Standard greeting")
 
-        # 2. Schema management
-        if any(kw in msg_lower for kw in SCHEMA_KEYWORDS):
-            return self._result("schema_management", 0.90, "keyword", "Contains schema creation keyword")
-
-        # 3. Data modification
-        if any(kw in msg_lower for kw in MUTATION_KEYWORDS):
-            return self._result("data_modification", 0.88, "keyword", "Contains data mutation keyword")
-
-        # 4. Score SQL vs Document vs Conceptual
-        sql_score = sum(1 for kw in SQL_KEYWORDS if kw in msg_lower)
-        doc_score = sum(1 for kw in DOC_KEYWORDS if kw in msg_lower)
-        concept_score = sum(1 for kw in CONCEPTUAL_KEYWORDS if kw in msg_lower)
-
-        # Bonus: if user has uploaded docs and asks about them
-        if has_uploaded_docs and doc_score > 0:
-            doc_score += 2
-
-        # Hybrid: both doc and SQL signals
-        if doc_score >= 2 and sql_score >= 2:
-            return self._result("hybrid", 0.75, "keyword", f"Mixed signals: sql={sql_score}, doc={doc_score}")
-
-        if doc_score >= 2:
-            return self._result("document_qa", 0.80, "keyword", f"Document question signals (score={doc_score})")
-
-        if sql_score >= 2:
-            return self._result("sql_analytics", 0.82, "keyword", f"SQL analytics signals (score={sql_score})")
-
-        # Conceptual question — no DB/doc keywords, but has explanatory intent
-        if concept_score >= 1 and sql_score <= 1 and doc_score == 0:
-            # Still might be a database conceptual question
-            db_concept = any(
-                kw in msg_lower
-                for kw in ["sql", "join", "index", "query", "database", "table", "key", "schema"]
-            )
-            return self._result(
-                "general_knowledge", 0.78, "keyword",
-                f"Conceptual question {'about DB concepts' if db_concept else ''}"
-            )
-
-        # 5. LLM classification for ambiguous cases (if API key available)
+        # 2. Primary: LLM-Driven Dynamic Intent Classification with Context
         if self.provider and self.provider.has_active_api_key():
-            return self._llm_classify(message, has_uploaded_docs, conversation_history)
+            try:
+                return self._llm_classify(
+                    message=cleaned,
+                    has_uploaded_docs=has_uploaded_docs,
+                    conversation_history=conversation_history,
+                    schema_context=schema_context,
+                )
+            except Exception as e:
+                # LLM classification failed; fall through to offline heuristic
+                pass
 
-        # 6. Default fallback: try SQL if there's any database-like word
-        if sql_score >= 1:
-            return self._result("sql_analytics", 0.55, "keyword", "Weak SQL signal, defaulting to analytics")
-
-        return self._result("ambiguous", 0.40, "keyword", "Unable to determine intent clearly")
+        # 3. Offline Heuristic Fallback (only when no LLM key is configured or call fails)
+        return self._heuristic_classify(cleaned, has_uploaded_docs, conversation_history)
 
     def _llm_classify(
         self,
         message: str,
         has_uploaded_docs: bool,
-        conversation_history: Optional[List[Dict]],
+        conversation_history: Optional[List[Dict[str, str]]],
+        schema_context: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Use LLM to classify genuinely ambiguous messages."""
-        history_summary = ""
+        """
+        Calls LLM to dynamically determine intent using structured JSON output.
+        """
+        history_summary = "None"
         if conversation_history:
             recent = conversation_history[-4:]
             history_summary = "\n".join(
-                f"{m.get('role', 'user').upper()}: {m.get('content', '')[:200]}"
-                for m in recent
+                f"- {m.get('role', 'user').upper()}: {m.get('content', '')[:180]}"
+                for m in recent if m.get("content")
             )
 
-        prompt = f"""Classify this user message into exactly one intent category.
+        tables_info = "None"
+        if schema_context and "tables" in schema_context:
+            table_names = list(schema_context["tables"].keys())
+            if table_names:
+                tables_info = ", ".join(table_names[:12])
 
-Message: "{message}"
+        prompt = f"""You are the intent router for a Conversational SQL Analytics Assistant.
+Analyze the user's message and select EXACTLY ONE category.
 
-Recent Conversation:
-{history_summary or "None"}
+User Message: "{message}"
 
-Has Uploaded Documents: {has_uploaded_docs}
+Context:
+- Uploaded Documents Available: {has_uploaded_docs}
+- Available Database Tables: {tables_info}
+- Recent Conversation:
+{history_summary}
 
-Categories:
-- sql_analytics: User wants to query/analyze data from a database
-- document_qa: User wants information from an uploaded PDF/document
-- hybrid: User needs both database data AND document content
-- general_knowledge: Conceptual/educational question, no specific data needed
-- greeting: Greetings, thanks, small talk
-- schema_management: User wants to create/modify database tables
-- data_modification: User wants to INSERT/UPDATE/DELETE data
-- ambiguous: Genuinely unclear, needs clarification
+Intent Categories:
+1. "sql_analytics": Querying, calculating, filtering, comparing, ranking, or visualizing data from tables (e.g., "find employees earning more than dept average", "show sales by region", "show top 3", "which department performed best?").
+2. "document_qa": Questions seeking information, definitions, methodology, summaries, citations, or analysis from uploaded documents or PDFs (e.g., "explain the methodology", "what are its limitations?", "summarize the uploaded report").
+3. "hybrid": Questions explicitly requiring BOTH structured database tables AND document text to answer (e.g., "compare the findings in my PDF with the employee dataset").
+4. "general_knowledge": Conceptual questions about SQL, data architecture, statistics, or technology not requiring private data (e.g., "how does a B-tree index work?", "difference between inner and left join").
+5. "greeting": Greetings, small talk, appreciation, farewells (e.g., "hello", "how are you?", "thanks for the help").
+6. "schema_management": Creating, altering, designing, or dropping database tables via DDL (e.g., "create a table for customers", "add column discount").
+7. "data_modification": Inserting, updating, or deleting specific records in a table (e.g., "insert a new department named AI Lab", "update salary to 90000").
+8. "ambiguous": The request is completely indecipherable or unclear.
 
-Return JSON only:
-{{"intent": "...", "confidence": 0.85, "reasoning": "one sentence"}}"""
+CRITICAL INSTRUCTIONS:
+- If the user asks a follow-up like "what are its limitations?" and the previous turns discussed a document/paper, classify as "document_qa".
+- If the user asks a follow-up like "show only top three" and the previous turns discussed SQL data, classify as "sql_analytics".
+- Do NOT classify document questions as "general_knowledge" if documents are uploaded.
 
-        try:
-            result = self.provider.generate_structured_json(prompt)
-            intent = result.get("intent", "ambiguous")
-            # Validate intent is one of the known categories
-            valid = {
-                "sql_analytics", "document_qa", "hybrid", "general_knowledge",
-                "greeting", "schema_management", "data_modification", "ambiguous"
-            }
-            if intent not in valid:
-                intent = "ambiguous"
-            return self._result(
-                intent,
-                float(result.get("confidence", 0.70)),
-                "llm",
-                result.get("reasoning", "LLM classified")
-            )
-        except Exception:
-            return self._result("sql_analytics", 0.50, "keyword", "LLM classification failed, defaulting")
+Return ONLY a JSON object:
+{{"intent": "<category>", "confidence": 0.95, "reasoning": "<one sentence explanation>"}}"""
+
+        result = self.provider.generate_structured_json(prompt)
+        intent = result.get("intent", "").strip().lower()
+        if intent not in VALID_INTENTS:
+            intent = "sql_analytics" if has_uploaded_docs is False else "document_qa"
+
+        confidence = float(result.get("confidence", 0.85))
+        reasoning = result.get("reasoning", "LLM classified intent")
+        return self._result(intent, confidence, "llm", reasoning)
+
+    def _heuristic_classify(
+        self,
+        message: str,
+        has_uploaded_docs: bool,
+        conversation_history: Optional[List[Dict[str, str]]],
+    ) -> Dict[str, Any]:
+        """Offline rule-based fallback when LLM is unavailable."""
+        msg_lower = message.lower()
+
+        # Schema management
+        if any(w in msg_lower for w in ["create table", "alter table", "add column", "drop table", "make a table"]):
+            return self._result("schema_management", 0.85, "heuristic", "Matches schema management pattern")
+
+        # Data modification
+        if any(w in msg_lower for w in ["insert into", "delete from", "update ", "add record"]):
+            return self._result("data_modification", 0.85, "heuristic", "Matches data modification pattern")
+
+        # Document signals
+        doc_signals = any(w in msg_lower for w in [
+            "document", "pdf", "paper", "methodology", "limitations", "section", "paragraph", "author", "findings"
+        ])
+        if has_uploaded_docs and doc_signals:
+            return self._result("document_qa", 0.80, "heuristic", "Document question pattern with docs present")
+
+        # General conceptual questions
+        if any(w in msg_lower for w in ["what is a", "what are", "difference between", "how do indexes", "explain b-tree"]):
+            return self._result("general_knowledge", 0.80, "heuristic", "Matches conceptual explanation pattern")
+
+        # Default to SQL analytics
+        return self._result("sql_analytics", 0.65, "heuristic", "Defaulted to analytics")
 
     @staticmethod
     def _result(intent: str, confidence: float, method: str, reasoning: str) -> Dict[str, Any]:
         return {
             "intent": intent,
-            "confidence": confidence,
+            "confidence": round(confidence, 2),
             "method": method,
             "reasoning": reasoning,
         }

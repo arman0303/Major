@@ -178,62 +178,77 @@ Provide a clear explanation. If it's about SQL or databases, include a brief exa
         chunks: List[Dict[str, Any]],
         history: List[Dict[str, str]],
     ) -> Dict[str, Any]:
-        """Answer questions grounded in retrieved document chunks."""
+        """Answer questions strictly grounded in retrieved document chunks with citations."""
         if not chunks:
             return self._chat_response(
-                "I don't see any relevant content in your uploaded documents for this question. "
-                "Please make sure you've uploaded and processed a document in this project, "
-                "or try rephrasing your question.",
+                "I could not find relevant content in your uploaded documents for this question. "
+                "Please ensure your document has been uploaded and indexed in this project, "
+                "or try phrasing your inquiry around specific concepts from the text.",
                 "document_qa"
             )
 
+        formatted_sources = [
+            {
+                "document_name": c.get("metadata", {}).get("source", "Document"),
+                "page_number": c.get("metadata", {}).get("page_number", 1),
+                "similarity": c.get("similarity", 0.0),
+                "chunk_id": c.get("id"),
+                "content_preview": c.get("content", "")[:250] + "..." if len(c.get("content", "")) > 250 else c.get("content", "")
+            }
+            for c in chunks
+        ]
+
         if not self.provider.has_active_api_key():
-            # Show chunk content without LLM synthesis
+            # Show verified chunk content without LLM synthesis
             content = "\n\n".join(
-                f"**[{c.get('metadata', {}).get('source', 'Document')}, "
-                f"p.{c.get('metadata', {}).get('page_number', '?')}]**\n{c['content']}"
-                for c in chunks[:3]
+                f"**[{c.get('metadata', {}).get('source', 'Document')}, Page {c.get('metadata', {}).get('page_number', '?')}]**\n{c['content']}"
+                for c in chunks[:4]
             )
             return self._chat_response(
-                f"Here are the most relevant excerpts from your documents:\n\n{content}",
+                f"Here are the relevant verified excerpts from your uploaded document:\n\n{content}",
                 "document_qa",
-                sources=chunks
+                sources=formatted_sources
             )
 
-        # Build context from chunks
+        # Build context from chunks with explicit source markers
         context_parts = []
-        for i, chunk in enumerate(chunks[:6], 1):
+        for i, chunk in enumerate(chunks[:7], 1):
             meta = chunk.get("metadata", {})
             source = meta.get("source", "Document")
             page = meta.get("page_number", "")
-            loc = f"{source}{f', page {page}' if page else ''}"
-            context_parts.append(f"[Excerpt {i} — {loc}]\n{chunk['content']}")
+            loc = f"{source}{f', Page {page}' if page else ''}"
+            context_parts.append(f"--- EXCERPT {i} ({loc}) ---\n{chunk['content']}")
 
-        context_text = "\n\n---\n\n".join(context_parts)
+        context_text = "\n\n".join(context_parts)
         history_context = self._format_history(history, max_turns=4)
 
-        prompt = f"""Answer the user's question using ONLY the document excerpts provided below.
-If the answer is not in the excerpts, say so clearly — do not fabricate.
-Always cite the source document and page number when referencing specific information.
+        prompt = f"""You are answering a question based strictly on the provided uploaded document excerpts.
 
-Document Excerpts:
+DOCUMENT EXCERPTS:
 {context_text}
 
-{f"Recent conversation:{chr(10)}{history_context}" if history_context else ""}
+{f"RECENT CONVERSATION CONTEXT:{chr(10)}{history_context}{chr(10)}" if history_context else ""}
+USER QUESTION: {message}
 
-Question: {message}
+STRICT GROUNDING & CITATION RULES:
+1. Base your answer EXCLUSIVELY on facts directly stated in the excerpts above.
+2. If the excerpts do not contain the answer, explicitly state: "Based on the uploaded document, I could not find information regarding that." DO NOT speculate or invent information.
+3. For every major finding, claim, or summary point, cite the document name and page number (e.g., "[Research_Paper.pdf, Page 4]").
+4. If this is a follow-up inquiry (e.g. "what are its limitations?", "explain its methodology"), resolve pronouns using the recent conversation context.
+5. Present the response with clear formatting, using bullet points or sections where appropriate.
 
-Answer (cite sources inline, e.g., [Document Name, page 3]):"""
+ANSWER:"""
 
         try:
-            answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.2)
-            return self._chat_response(answer, "document_qa", sources=chunks)
+            answer = self.provider.generate_completion(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.1)
+            return self._chat_response(answer, "document_qa", sources=formatted_sources)
         except Exception as e:
             return self._chat_response(
-                f"Found relevant content but couldn't synthesize an answer: {str(e)}. "
-                f"Here are the relevant excerpts: {context_parts[0][:500] if context_parts else ''}",
+                f"I found relevant excerpts from your document, but encountered an error synthesizing the final response: {str(e)}.\n\n"
+                f"**Top Excerpt [{formatted_sources[0]['document_name']}, Page {formatted_sources[0]['page_number']}]:**\n"
+                f"{chunks[0]['content'][:600]}...",
                 "document_qa",
-                sources=chunks
+                sources=formatted_sources
             )
 
     def _handle_hybrid(

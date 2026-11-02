@@ -75,10 +75,11 @@ npm run dev
 
 ## 🧪 Automated Verification Suite
 
-Run the full end-to-end verification covering all 25 critical scenarios:
+Run the full end-to-end verification covering all 28 critical scenarios across Documents & RAG, Dynamic AI, Chat History, and Security:
 ```bash
-# Run 25 Critical Workflows Test
-npx tsx backend/tests/e2e_verification.ts
+# Run 28 Critical Workflows Test
+cd backend
+npx tsx tests/e2e_verification.ts
 
 # Run AI Service Unit Tests
 cd ai-service
