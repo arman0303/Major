@@ -22,6 +22,8 @@ import {
   ChevronDown,
   ArrowUp,
   ExternalLink,
+  Square,
+  RefreshCw,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { api, ChatResponse, DocumentSource } from '../services/api';
@@ -29,6 +31,7 @@ import { Message, Conversation, QueryResult, VisualizationConfig } from '../type
 import { DataVisualization } from '../components/DataVisualization';
 import { RightPanel } from '../components/RightPanel';
 import { ConfirmationModal } from '../components/ConfirmationModal';
+import { MarkdownContent } from '../components/MarkdownContent';
 import { cn } from '../utils/cn';
 
 const SUGGESTIONS = [
@@ -86,6 +89,7 @@ export const ChatWorkspace: React.FC = () => {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const { copiedId, copy } = useCopyToClipboard();
 
   // Load or switch conversation
@@ -214,7 +218,17 @@ export const ChatWorkspace: React.FC = () => {
     }
   };
 
-  // Send Message with Simulated Typing / Token Stream
+  // Stop current streaming generation
+  const handleStopGeneration = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsLoading(false);
+    setStreamingContent('');
+  };
+
+  // Send Message with Genuine Real-Time Token / SSE Streaming
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputPrompt).trim();
     if (!text || isLoading) return;
@@ -246,6 +260,7 @@ export const ChatWorkspace: React.FC = () => {
 
     setInputPrompt('');
     setIsLoading(true);
+    setStreamingContent('');
 
     const tempUserId = `usr_${Date.now()}`;
     const userMsg: Message = {
@@ -257,79 +272,151 @@ export const ChatWorkspace: React.FC = () => {
     };
     setMessages(prev => [...prev, userMsg]);
 
+    const abortCtrl = new AbortController();
+    abortControllerRef.current = abortCtrl;
+    let streamedText = '';
+    let completedMsgData: any = null;
+
     try {
-      const res: ChatResponse = await api.chat({
-        conversationId: targetConv.id,
-        projectId: targetProject.id,
-        message: text,
-      });
-
-      // Stream effect for ChatGPT feel
-      const fullAnswer = res.answer || res.explanation || 'Processed successfully.';
-      setStreamingContent('');
-
-      // Quick progressive typewriter animation
-      let currentIdx = 0;
-      const chunkSize = Math.max(1, Math.floor(fullAnswer.length / 25));
-      const interval = setInterval(() => {
-        currentIdx += chunkSize;
-        if (currentIdx >= fullAnswer.length) {
-          clearInterval(interval);
-          setStreamingContent('');
-
-          const assistantMsg: Message = {
-            id: res.message_id,
-            conversation_id: targetConv!.id,
-            role: 'assistant',
-            content: fullAnswer,
-            generated_sql: res.generated_sql || undefined,
-            query_result: res.query_result,
-            visualization_config: res.visualization_config,
-            requires_confirmation: res.requires_confirmation,
-            confirmation_status: res.requires_confirmation ? 'pending' : 'none',
-            execution_time_ms: res.execution_time_ms,
-            error_message: res.error_message || undefined,
-            created_at: new Date().toISOString(),
-            ...(res.intent ? { intent_type: res.intent } : {}),
-            ...(res.document_sources ? { document_sources: res.document_sources } : {}),
-          } as any;
-
-          setMessages(prev => [...prev, assistantMsg]);
-
-          if (res.generated_sql) {
-            setActiveSql(res.generated_sql);
-            if (res.query_result) {
-              setActiveResult(res.query_result);
+      await api.chatStream(
+        {
+          conversationId: targetConv.id,
+          projectId: targetProject.id,
+          message: text,
+        },
+        {
+          onToken: (token: string) => {
+            streamedText += token;
+            setStreamingContent(streamedText);
+          },
+          onSql: (sqlData: any) => {
+            if (sqlData.generated_sql) {
+              setActiveSql(sqlData.generated_sql);
+            }
+          },
+          onResult: (resData: any) => {
+            if (resData.query_result) {
+              setActiveResult(resData.query_result);
               setIsInspectorOpen(true);
             }
-          }
-          setActiveViz(res.visualization_config);
-          setActiveDuration(res.execution_time_ms);
-          setActiveError(res.error_message || null);
-
-          if (res.requires_confirmation && res.generated_sql) {
-            setPendingConfirmationSql(res.generated_sql);
-          }
-
-          setIsLoading(false);
-          window.dispatchEvent(new CustomEvent('chat-updated'));
-        } else {
-          setStreamingContent(fullAnswer.slice(0, currentIdx));
-        }
-      }, 25);
-
-    } catch (err: any) {
-      setIsLoading(false);
-      setMessages(prev => [
-        ...prev,
-        {
-          id: `err_${Date.now()}`,
-          conversation_id: targetConv?.id || activeConv?.id || '',
-          role: 'assistant',
-          content: `I encountered an issue processing your request: ${err.message || 'Unknown error'}`,
-          created_at: new Date().toISOString(),
+          },
+          onStatus: (statusText: string) => {
+            // Live status can be logged or displayed
+          },
+          onComplete: (data: any) => {
+            completedMsgData = data;
+          },
+          onError: (errMsg: string) => {
+            console.warn('Stream notification:', errMsg);
+          },
         },
-      ]);
+        abortCtrl.signal
+      );
+
+      setStreamingContent('');
+      const finalContent = completedMsgData?.answer || streamedText || 'Processed successfully.';
+      const assistantMsg: Message = {
+        id: completedMsgData?.message_id || `ast_${Date.now()}`,
+        conversation_id: targetConv.id,
+        role: 'assistant',
+        content: finalContent,
+        generated_sql: completedMsgData?.generated_sql || undefined,
+        query_result: completedMsgData?.query_result || activeResult,
+        visualization_config: completedMsgData?.visualization_config,
+        requires_confirmation: completedMsgData?.requires_confirmation || false,
+        confirmation_status: completedMsgData?.requires_confirmation ? 'pending' : 'none',
+        execution_time_ms: completedMsgData?.execution_time_ms,
+        created_at: new Date().toISOString(),
+        ...(completedMsgData?.intent ? { intent_type: completedMsgData.intent } : {}),
+        ...(completedMsgData?.document_sources ? { document_sources: completedMsgData.document_sources } : {}),
+      } as any;
+
+      setMessages(prev => [...prev, assistantMsg]);
+
+      if (completedMsgData?.generated_sql) {
+        setActiveSql(completedMsgData.generated_sql);
+        if (completedMsgData.query_result) {
+          setActiveResult(completedMsgData.query_result);
+          setIsInspectorOpen(true);
+        }
+      }
+      setActiveViz(completedMsgData?.visualization_config);
+      setActiveDuration(completedMsgData?.execution_time_ms);
+
+      if (completedMsgData?.requires_confirmation && completedMsgData?.generated_sql) {
+        setPendingConfirmationSql(completedMsgData.generated_sql);
+      }
+
+      window.dispatchEvent(new CustomEvent('chat-updated'));
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        if (streamedText) {
+          setMessages(prev => [
+            ...prev,
+            {
+              id: `ast_stopped_${Date.now()}`,
+              conversation_id: targetConv?.id || '',
+              role: 'assistant',
+              content: streamedText + '\n\n*(Generation stopped by user)*',
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        }
+      } else {
+        // Fallback to standard chat endpoint if streaming protocol failed
+        try {
+          const fallbackRes = await api.chat({
+            conversationId: targetConv.id,
+            projectId: targetProject.id,
+            message: text,
+          });
+          const fullAnswer = fallbackRes.answer || fallbackRes.explanation || 'Processed successfully.';
+          const assistantMsg: Message = {
+            id: fallbackRes.message_id,
+            conversation_id: targetConv.id,
+            role: 'assistant',
+            content: fullAnswer,
+            generated_sql: fallbackRes.generated_sql || undefined,
+            query_result: fallbackRes.query_result,
+            visualization_config: fallbackRes.visualization_config,
+            requires_confirmation: fallbackRes.requires_confirmation,
+            confirmation_status: fallbackRes.requires_confirmation ? 'pending' : 'none',
+            execution_time_ms: fallbackRes.execution_time_ms,
+            error_message: fallbackRes.error_message || undefined,
+            created_at: new Date().toISOString(),
+            ...(fallbackRes.intent ? { intent_type: fallbackRes.intent } : {}),
+            ...(fallbackRes.document_sources ? { document_sources: fallbackRes.document_sources } : {}),
+          } as any;
+          setMessages(prev => [...prev, assistantMsg]);
+        } catch (chatErr: any) {
+          setMessages(prev => [
+            ...prev,
+            {
+              id: `err_${Date.now()}`,
+              conversation_id: targetConv?.id || activeConv?.id || '',
+              role: 'assistant',
+              content: `I encountered an issue processing your request: ${chatErr.message || err.message || 'Unknown error'}`,
+              created_at: new Date().toISOString(),
+            },
+          ]);
+        }
+      }
+    } finally {
+      setIsLoading(false);
+      setStreamingContent('');
+      abortControllerRef.current = null;
+    }
+  };
+
+  // Regenerate Response from last user question
+  const handleRegenerate = (msgIndex: number) => {
+    if (isLoading) return;
+    // Find preceding user message
+    for (let i = msgIndex - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        handleSendMessage(messages[i].content);
+        break;
+      }
     }
   };
 
@@ -457,7 +544,7 @@ export const ChatWorkspace: React.FC = () => {
             </div>
           ) : (
             <div className="max-w-3xl mx-auto space-y-6">
-              {messages.map(msg => {
+              {messages.map((msg, idx) => {
                 const isUser = msg.role === 'user';
                 return (
                   <div key={msg.id} className={cn('flex gap-3.5 text-sm', isUser ? 'justify-end' : 'justify-start')}>
@@ -476,7 +563,11 @@ export const ChatWorkspace: React.FC = () => {
                             : 'bg-card border border-border/80 text-foreground rounded-tl-xs'
                         )}
                       >
-                        <div className="whitespace-pre-wrap">{msg.content}</div>
+                        {isUser ? (
+                          <div className="whitespace-pre-wrap">{msg.content}</div>
+                        ) : (
+                          <MarkdownContent content={msg.content} />
+                        )}
 
                         {/* Inline Data Preview Table if SQL results exist */}
                         {!isUser && msg.query_result && msg.query_result.records?.length > 0 && (
@@ -550,9 +641,40 @@ export const ChatWorkspace: React.FC = () => {
                         )}
                       </div>
 
-                      {/* Action buttons under message */}
-                      {!isUser && (msg.generated_sql || msg.query_result) && (
-                        <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+                      {/* Action buttons under assistant message */}
+                      {!isUser && (
+                        <div className="flex items-center gap-3 px-1 pt-0.5 text-xs text-muted-foreground">
+                          {/* Copy Message Content */}
+                          <button
+                            onClick={() => copy(msg.content, msg.id + '-content')}
+                            className="flex items-center gap-1 hover:text-foreground transition-colors text-[11px]"
+                            title="Copy response"
+                          >
+                            {copiedId === msg.id + '-content' ? (
+                              <>
+                                <CheckCheck className="w-3.5 h-3.5 text-emerald-500" />
+                                <span className="text-emerald-500 font-medium">Copied!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-3.5 h-3.5" />
+                                <span>Copy</span>
+                              </>
+                            )}
+                          </button>
+
+                          {/* Regenerate Response */}
+                          <button
+                            onClick={() => handleRegenerate(idx)}
+                            disabled={isLoading}
+                            className="flex items-center gap-1 hover:text-foreground transition-colors text-[11px] disabled:opacity-40"
+                            title="Regenerate response"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Regenerate</span>
+                          </button>
+
+                          {/* Copy SQL if present */}
                           {msg.generated_sql && (
                             <button
                               onClick={() => copy(msg.generated_sql!, msg.id + '-sql')}
@@ -561,13 +683,14 @@ export const ChatWorkspace: React.FC = () => {
                               {copiedId === msg.id + '-sql' ? (
                                 <CheckCheck className="w-3.5 h-3.5 text-emerald-500" />
                               ) : (
-                                <Copy className="w-3.5 h-3.5" />
+                                <Code2 className="w-3.5 h-3.5" />
                               )}
                               <span>Copy SQL</span>
                             </button>
                           )}
+
                           {msg.execution_time_ms !== undefined && msg.execution_time_ms > 0 && (
-                            <span className="text-[10px]">• {msg.execution_time_ms}ms</span>
+                            <span className="text-[10px] text-muted-foreground">• {msg.execution_time_ms}ms</span>
                           )}
                         </div>
                       )}
@@ -589,7 +712,7 @@ export const ChatWorkspace: React.FC = () => {
                     <Bot className="w-4 h-4" />
                   </div>
                   <div className="px-4 py-3 rounded-2xl bg-card border border-border/80 text-foreground rounded-tl-xs shadow-xs max-w-[85%]">
-                    <div className="whitespace-pre-wrap">{streamingContent}</div>
+                    <MarkdownContent content={streamingContent} />
                     <span className="inline-block w-1.5 h-4 bg-primary animate-pulse ml-0.5 align-middle" />
                   </div>
                 </div>
@@ -647,14 +770,26 @@ export const ChatWorkspace: React.FC = () => {
                 disabled={isLoading}
               />
 
-              {/* Submit button */}
-              <button
-                onClick={() => handleSendMessage()}
-                disabled={!inputPrompt.trim() || isLoading}
-                className="w-8 h-8 rounded-xl bg-primary text-primary-foreground flex items-center justify-center hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-all shrink-0 ml-1 shadow-xs"
-              >
-                <ArrowUp className="w-4 h-4 stroke-[2.5]" />
-              </button>
+              {/* Submit or Stop button */}
+              {isLoading ? (
+                <button
+                  type="button"
+                  onClick={handleStopGeneration}
+                  className="w-8 h-8 rounded-xl bg-destructive text-destructive-foreground flex items-center justify-center hover:bg-destructive/90 transition-all shrink-0 ml-1 shadow-xs"
+                  title="Stop generation"
+                >
+                  <Square className="w-3.5 h-3.5 fill-current" />
+                </button>
+              ) : (
+                <button
+                  onClick={() => handleSendMessage()}
+                  disabled={!inputPrompt.trim() || isUploading}
+                  className="w-8 h-8 rounded-xl bg-primary text-primary-foreground flex items-center justify-center hover:bg-primary/90 disabled:opacity-30 disabled:cursor-not-allowed transition-all shrink-0 ml-1 shadow-xs"
+                  title="Send message"
+                >
+                  <ArrowUp className="w-4 h-4 stroke-[2.5]" />
+                </button>
+              )}
             </div>
 
             <p className="text-[11px] text-center text-muted-foreground">

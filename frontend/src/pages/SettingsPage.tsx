@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Key, Shield, Sparkles, CheckCircle2, Trash2 } from 'lucide-react';
+import { Settings, Key, Shield, Sparkles, CheckCircle2, Trash2, Activity, AlertCircle, RefreshCw } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { api } from '../services/api';
@@ -12,24 +12,77 @@ export const SettingsPage: React.FC = () => {
   const [provider, setProvider] = useState<'gemini' | 'openai'>('gemini');
   const [geminiKey, setGeminiKey] = useState<string>('');
   const [openaiKey, setOpenaiKey] = useState<string>('');
+  const [savedGeminiMasked, setSavedGeminiMasked] = useState<string>('');
+  const [savedOpenaiMasked, setSavedOpenaiMasked] = useState<string>('');
   const [autoExecute, setAutoExecute] = useState<boolean>(true);
   const [rowLimit, setRowLimit] = useState<number>(500);
   const [isSaved, setIsSaved] = useState<boolean>(false);
   const [projectName, setProjectName] = useState<string>('');
 
-  useEffect(() => {
+  // Provider Health State
+  const [isTestingHealth, setIsTestingHealth] = useState<boolean>(false);
+  const [healthResult, setHealthResult] = useState<{
+    healthy: boolean;
+    status: string;
+    message: string;
+    active_model?: string;
+  } | null>(null);
+
+  const loadProfile = () => {
     api.getProfile().then(res => {
       if (res.settings) {
-        setProvider(res.settings.default_llm_provider || 'gemini');
+        setProvider((res.settings.default_llm_provider as any) || 'gemini');
         setAutoExecute(res.settings.auto_execute_select ?? true);
         setRowLimit(res.settings.max_row_limit || 500);
+        setSavedGeminiMasked(res.settings.gemini_api_key || '');
+        setSavedOpenaiMasked(res.settings.openai_api_key || '');
       }
     }).catch(console.error);
+  };
 
+  useEffect(() => {
+    loadProfile();
     if (activeProject) {
       setProjectName(activeProject.name);
     }
   }, [activeProject]);
+
+  const handleTestHealth = async () => {
+    setIsTestingHealth(true);
+    setHealthResult(null);
+    try {
+      const res = await api.checkProviderHealth(provider, provider === 'gemini' ? (geminiKey || undefined) : (openaiKey || undefined));
+      setHealthResult(res);
+    } catch (err: any) {
+      setHealthResult({
+        healthy: false,
+        status: 'error',
+        message: err.message || 'Could not verify provider health',
+      });
+    } finally {
+      setIsTestingHealth(false);
+    }
+  };
+
+  const handleClearKey = async (type: 'gemini' | 'openai') => {
+    try {
+      const payload: any = {};
+      if (type === 'gemini') {
+        payload.geminiApiKey = null;
+        setGeminiKey('');
+        setSavedGeminiMasked('');
+      } else {
+        payload.openaiApiKey = null;
+        setOpenaiKey('');
+        setSavedOpenaiMasked('');
+      }
+      await api.updateSettings(payload);
+      loadProfile();
+      alert(`Custom ${type.toUpperCase()} key removed. Reverted to environment configuration.`);
+    } catch (err: any) {
+      alert(`Clear failed: ${err.message}`);
+    }
+  };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -44,6 +97,7 @@ export const SettingsPage: React.FC = () => {
 
       await api.updateSettings(payload);
       setIsSaved(true);
+      loadProfile();
       setTimeout(() => setIsSaved(false), 3000);
     } catch (err: any) {
       alert(`Save failed: ${err.message}`);
@@ -76,11 +130,50 @@ export const SettingsPage: React.FC = () => {
 
       <form onSubmit={handleSaveSettings} className="space-y-6">
         {/* AI Model Configuration Box */}
-        <div className="rounded-xl border border-border bg-card p-6 space-y-4 shadow-sm">
-          <div className="flex items-center gap-2.5">
-            <Sparkles className="w-4 h-4 text-primary" />
-            <h3 className="font-semibold text-sm text-foreground">AI Service & LLM Provider</h3>
+        <div className="rounded-xl border border-border bg-card p-6 space-y-5 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Sparkles className="w-4 h-4 text-primary" />
+              <h3 className="font-semibold text-sm text-foreground">AI Service & LLM Provider</h3>
+            </div>
+            {/* Live Health Check Trigger */}
+            <button
+              type="button"
+              onClick={handleTestHealth}
+              disabled={isTestingHealth}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-muted/70 hover:bg-muted text-foreground text-xs font-medium transition-colors disabled:opacity-50"
+              title="Make real lightweight probe to test credentials & quota"
+            >
+              <Activity className={`w-3.5 h-3.5 ${isTestingHealth ? 'animate-spin text-primary' : 'text-emerald-500'}`} />
+              <span>{isTestingHealth ? 'Testing...' : 'Test Connection & Health'}</span>
+            </button>
           </div>
+
+          {/* Health Status Result Card */}
+          {healthResult && (
+            <div className={`p-3.5 rounded-xl border text-xs flex items-start gap-2.5 ${
+              healthResult.healthy
+                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                : 'bg-amber-500/10 border-amber-500/30 text-amber-200'
+            }`}>
+              {healthResult.healthy ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              ) : (
+                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              )}
+              <div className="space-y-0.5 flex-1">
+                <div className="flex items-center justify-between font-semibold">
+                  <span>Provider Status: {healthResult.status.toUpperCase()}</span>
+                  {healthResult.active_model && (
+                    <span className="font-mono text-[11px] bg-background/50 px-2 py-0.5 rounded border border-border/50">
+                      Model: {healthResult.active_model}
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] leading-relaxed opacity-90">{healthResult.message}</p>
+              </div>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <label className="text-xs space-y-1 block">
@@ -90,8 +183,8 @@ export const SettingsPage: React.FC = () => {
                 onChange={e => setProvider(e.target.value as any)}
                 className="w-full bg-muted border border-border rounded-lg px-3 py-2 text-xs text-foreground focus:outline-none"
               >
-                <option value="gemini">Google Gemini (Gemini 3.8 Flash)</option>
-                <option value="openai">OpenAI (GPT-4o)</option>
+                <option value="gemini">Google Gemini (Gemini 2.5 Flash Lite / Pro)</option>
+                <option value="openai">OpenAI (GPT-4o Mini / GPT-4o)</option>
               </select>
             </label>
 
@@ -109,32 +202,66 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           {/* Gemini API Key */}
-          <div className="space-y-1 pt-2">
-            <label className="text-xs font-medium text-foreground flex items-center gap-1.5">
-              <Key className="w-3.5 h-3.5 text-muted-foreground" />
-              Google Gemini API Key
-            </label>
+          <div className="space-y-1.5 pt-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-foreground flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5 text-muted-foreground" />
+                Google Gemini API Key
+              </label>
+              {savedGeminiMasked && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
+                    Active: {savedGeminiMasked}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleClearKey('gemini')}
+                    className="text-[11px] text-destructive hover:underline flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
             <input
               type="password"
-              placeholder="Paste GEMINI_API_KEY to enable live Gemini LLM..."
+              placeholder={savedGeminiMasked ? "Enter new key to update..." : "Paste GEMINI_API_KEY (or use server .env)..."}
               value={geminiKey}
               onChange={e => setGeminiKey(e.target.value)}
               className="w-full bg-muted/60 border border-border rounded-lg px-3 py-2 text-xs font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             />
             <p className="text-[11px] text-muted-foreground">
-              If left blank, the assistant uses the deterministic PostgreSQL compiler engine with full schema reasoning.
+              User keys take precedence over environment defaults. If blank, server .env credentials or deterministic fallback is used.
             </p>
           </div>
 
           {/* OpenAI API Key */}
-          <div className="space-y-1 pt-2">
-            <label className="text-xs font-medium text-foreground flex items-center gap-1.5">
-              <Key className="w-3.5 h-3.5 text-muted-foreground" />
-              OpenAI API Key
-            </label>
+          <div className="space-y-1.5 pt-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-foreground flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5 text-muted-foreground" />
+                OpenAI API Key
+              </label>
+              {savedOpenaiMasked && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">
+                    Active: {savedOpenaiMasked}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleClearKey('openai')}
+                    className="text-[11px] text-destructive hover:underline flex items-center gap-1"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
             <input
               type="password"
-              placeholder="Paste OPENAI_API_KEY to enable live OpenAI LLM..."
+              placeholder={savedOpenaiMasked ? "Enter new key to update..." : "Paste OPENAI_API_KEY (or use server .env)..."}
               value={openaiKey}
               onChange={e => setOpenaiKey(e.target.value)}
               className="w-full bg-muted/60 border border-border rounded-lg px-3 py-2 text-xs font-mono text-foreground focus:outline-none focus:ring-1 focus:ring-primary"

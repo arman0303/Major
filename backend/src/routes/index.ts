@@ -29,10 +29,13 @@ router.get('/system/status', (_req, res) => {
     is_demo_mode: DatabaseManager.isDemoMode(),
   });
 });
+router.get('/system/provider-health', authenticateJWT, aiController.checkProviderHealth);
 
 // ================= AUTH ROUTES =================
 router.post('/auth/register', authController.register);
 router.post('/auth/login', authController.login);
+router.post('/auth/refresh', authController.refreshToken);
+router.post('/auth/logout', authController.logout);
 router.get('/auth/profile', authenticateJWT, authController.getProfile);
 router.put('/auth/settings', authenticateJWT, authController.updateSettings);
 
@@ -70,6 +73,7 @@ router.get('/sql/history', authenticateJWT, sqlController.getQueryHistory);
 
 // ================= AI ROUTES =================
 router.post('/ai/chat', authenticateJWT, aiController.handleAIChat);
+router.post('/ai/chat/stream', authenticateJWT, aiController.handleAIChatStream);
 router.post('/ai/insights', authenticateJWT, aiController.getInsights);
 router.post('/ai/index-document', authenticateJWT, aiController.indexDocument);
 

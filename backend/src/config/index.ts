@@ -1,8 +1,18 @@
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 
 // Load from project root .env
 dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+
+// Database Configuration Harmonization
+const pgHost = process.env.PG_HOST || 'localhost';
+const pgPort = parseInt(process.env.PG_PORT || '5432', 10);
+const pgUser = process.env.PG_USER || 'postgres';
+const pgPassword = process.env.PG_PASSWORD || 'postgres';
+const pgDatabase = process.env.PG_DATABASE || 'conversational_sql';
+const constructedDbUrl = `postgresql://${encodeURIComponent(pgUser)}:${encodeURIComponent(pgPassword)}@${pgHost}:${pgPort}/${pgDatabase}`;
+const resolvedDbUrl = process.env.DATABASE_URL || constructedDbUrl;
 
 export const config = {
   env: process.env.NODE_ENV || 'development',
@@ -16,12 +26,12 @@ export const config = {
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   },
   db: {
-    url: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/conversational_sql',
-    host: process.env.PG_HOST || 'localhost',
-    port: parseInt(process.env.PG_PORT || '5432', 10),
-    user: process.env.PG_USER || 'postgres',
-    password: process.env.PG_PASSWORD || 'postgres',
-    database: process.env.PG_DATABASE || 'conversational_sql',
+    url: resolvedDbUrl,
+    host: pgHost,
+    port: pgPort,
+    user: pgUser,
+    password: pgPassword,
+    database: pgDatabase,
     ssl: process.env.PG_SSL === 'true',
   },
   querySafety: {
@@ -35,3 +45,47 @@ export const config = {
     maxSizeBytes: 50 * 1024 * 1024, // 50MB
   },
 };
+
+/**
+ * Validates critical environment configuration at service startup.
+ * Prevents insecure placeholder secrets in production mode.
+ */
+export function validateEnvironment(): void {
+  const isProd = config.env === 'production';
+  const weakSecretPatterns = [
+    'change-in-production',
+    'super-secret',
+    'conversational-sql-jwt',
+    'default',
+    '123456',
+    'secret',
+  ];
+
+  if (isProd) {
+    if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+      throw new Error(
+        'SECURITY VIOLATION: Production requires JWT_SECRET with minimum 32 characters.'
+      );
+    }
+    if (weakSecretPatterns.some(p => (process.env.JWT_SECRET || '').toLowerCase().includes(p))) {
+      throw new Error(
+        'SECURITY VIOLATION: Insecure default or placeholder JWT_SECRET detected in production.'
+      );
+    }
+    if (!process.env.JWT_REFRESH_SECRET || process.env.JWT_REFRESH_SECRET.length < 32) {
+      throw new Error(
+        'SECURITY VIOLATION: Production requires JWT_REFRESH_SECRET with minimum 32 characters.'
+      );
+    }
+    if (weakSecretPatterns.some(p => (process.env.JWT_REFRESH_SECRET || '').toLowerCase().includes(p))) {
+      throw new Error(
+        'SECURITY VIOLATION: Insecure default or placeholder JWT_REFRESH_SECRET detected in production.'
+      );
+    }
+  }
+
+  // Ensure upload directory exists
+  if (!fs.existsSync(config.uploads.dir)) {
+    fs.mkdirSync(config.uploads.dir, { recursive: true });
+  }
+}

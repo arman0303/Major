@@ -558,16 +558,214 @@ Rules:
 
     @staticmethod
     def _format_history(history: List[Dict[str, str]], max_turns: int = 10) -> str:
-        """Format last N conversation turns as text context."""
+        """Format last N conversation turns as text context with safety character cap."""
         if not history:
             return ""
         recent = history[-max_turns * 2:]
         lines = []
-        for msg in recent:
+        total_chars = 0
+        max_allowed_chars = 4000
+
+        for msg in reversed(recent):
             role = msg.get("role", "user").capitalize()
-            content = msg.get("content", "")[:400]
-            lines.append(f"{role}: {content}")
+            content = msg.get("content", "")[:350]
+            line = f"{role}: {content}"
+            if total_chars + len(line) > max_allowed_chars:
+                break
+            lines.insert(0, line)
+            total_chars += len(line)
         return "\n".join(lines)
+
+    def stream_generate(
+        self,
+        intent: str,
+        message: str,
+        schema_context: Dict[str, Any],
+        conversation_history: List[Dict[str, str]],
+        document_chunks: Optional[List[Dict[str, Any]]] = None,
+        previous_sql: Optional[str] = None,
+    ):
+        """
+        Streaming generator yielding token chunks or operational events.
+        """
+        if intent == "sql_analytics":
+            yield {"type": "status", "message": "Analyzing schema and generating SQL query..."}
+            sql_res = self._handle_sql_analytics(message, schema_context, conversation_history, previous_sql)
+            yield {
+                "type": "sql",
+                "generated_sql": sql_res.get("generated_sql"),
+                "query_type": sql_res.get("query_type"),
+                "requires_confirmation": sql_res.get("requires_confirmation", False),
+                "visualization_recommendation": sql_res.get("visualization_recommendation"),
+                "explanation": sql_res.get("explanation", ""),
+            }
+            yield {
+                "type": "done",
+                "answer": sql_res.get("explanation", "Query generated."),
+                "intent": "sql_analytics",
+                "generated_sql": sql_res.get("generated_sql"),
+                "query_type": sql_res.get("query_type"),
+                "visualization_recommendation": sql_res.get("visualization_recommendation"),
+                "requires_confirmation": sql_res.get("requires_confirmation", False),
+            }
+            return
+
+        elif intent == "data_modification":
+            yield {"type": "status", "message": "Generating data modification statement..."}
+            mod_res = self._handle_data_modification(message, schema_context, conversation_history, previous_sql)
+            yield {
+                "type": "sql",
+                "generated_sql": mod_res.get("generated_sql"),
+                "query_type": mod_res.get("query_type"),
+                "requires_confirmation": True,
+            }
+            yield {
+                "type": "done",
+                "answer": mod_res.get("answer", "Modification prepared."),
+                "intent": "data_modification",
+                "generated_sql": mod_res.get("generated_sql"),
+                "requires_confirmation": True,
+            }
+            return
+
+        elif intent == "schema_management":
+            schema_res = self._handle_schema_management(message)
+            yield {
+                "type": "done",
+                "answer": schema_res.get("answer", "Schema generated."),
+                "intent": "schema_management",
+                "ddl_statements": schema_res.get("ddl_statements", []),
+                "generated_sql": schema_res.get("generated_sql"),
+                "requires_confirmation": True,
+            }
+            return
+
+        elif intent == "document_qa":
+            if not document_chunks:
+                msg = (
+                    "I could not find relevant content in your uploaded documents for this question. "
+                    "Please ensure your document has been uploaded and indexed in this project."
+                )
+                yield {"type": "token", "token": msg}
+                yield {"type": "done", "answer": msg, "intent": "document_qa"}
+                return
+
+            if not self.provider.has_active_api_key():
+                static_res = self._handle_document_qa(message, document_chunks, conversation_history)
+                yield {"type": "token", "token": static_res.get("answer", "")}
+                yield {"type": "done", "answer": static_res.get("answer", ""), "intent": "document_qa"}
+                return
+
+            context_parts = []
+            for i, chunk in enumerate(document_chunks[:7], 1):
+                meta = chunk.get("metadata", {})
+                source = meta.get("source", "Document")
+                page = meta.get("page_number", "")
+                loc = f"{source}{f', Page {page}' if page else ''}"
+                context_parts.append(f"--- EXCERPT {i} ({loc}) ---\n{chunk['content']}")
+
+            context_text = "\n\n".join(context_parts)
+            history_context = self._format_history(conversation_history, max_turns=6)
+            prompt = f"""You are answering a question based strictly on the provided uploaded document excerpts.
+
+DOCUMENT EXCERPTS:
+{context_text}
+
+{f"RECENT CONVERSATION CONTEXT:{chr(10)}{history_context}{chr(10)}" if history_context else ""}
+USER QUESTION: {message}
+
+STRICT GROUNDING & CITATION RULES:
+1. Base your answer EXCLUSIVELY on facts directly stated in the excerpts above.
+2. If the excerpts do not contain the answer, explicitly state: "Based on the uploaded document, I could not find information regarding that." DO NOT speculate or invent information.
+3. For every major finding, claim, or summary point, cite the document name and page number (e.g., "[Research_Paper.pdf, Page 4]").
+4. Present the response with clear formatting, using bullet points or sections where appropriate."""
+
+            full_answer = ""
+            try:
+                for token in self.provider.generate_stream(prompt, system_prompt=SYSTEM_CHAT_PROMPT, temperature=0.3):
+                    full_answer += token
+                    yield {"type": "token", "token": token}
+                yield {"type": "done", "answer": full_answer, "intent": "document_qa"}
+            except Exception as e:
+                classified = classify_llm_error(e)
+                err_msg = f"⚠️ {classified['message']}"
+                yield {"type": "token", "token": err_msg}
+                yield {"type": "done", "answer": err_msg, "intent": "document_qa"}
+            return
+
+        # General conversation / Programming help / General knowledge / Greeting / Ambiguous
+        if intent == "programming_help":
+            sys_prompt = PROGRAMMING_SYSTEM_PROMPT
+            temp = 0.3
+            context = self._format_history(conversation_history, max_turns=10)
+            prompt = f"""Provide expert programming help for the following question.
+
+{f"Conversation history:{chr(10)}{context}{chr(10)}" if context else ""}
+User: {message}
+
+Guidelines:
+- Provide working, well-commented code examples
+- Explain the approach step by step
+- For algorithms, include time and space complexity analysis
+- Format code blocks properly with the language name (e.g. ```java, ```python)"""
+        elif intent == "general_knowledge":
+            sys_prompt = SYSTEM_CHAT_PROMPT
+            temp = 0.3
+            context = self._format_history(conversation_history, max_turns=8)
+            prompt = f"""Answer this database/SQL/data architecture question clearly and concisely.
+
+{f"Recent conversation:{chr(10)}{context}" if context else ""}
+
+Question: {message}
+
+Provide a clear explanation with examples where helpful."""
+        elif intent == "greeting":
+            sys_prompt = SYSTEM_CHAT_PROMPT
+            temp = 0.5
+            context = self._format_history(conversation_history, max_turns=3)
+            prompt = f"""The user sent a greeting or introductory message. Respond warmly and briefly.
+Mention that you can help with: general knowledge, AI/ML concepts, programming, SQL analytics, and document analysis.
+
+{f"Recent conversation:{chr(10)}{context}" if context else ""}
+User: {message}
+
+Keep your response to 2-3 sentences. Be friendly and welcoming."""
+        else:
+            sys_prompt = SYSTEM_CHAT_PROMPT
+            temp = 0.4
+            context = self._format_history(conversation_history, max_turns=10)
+            prompt = f"""Answer the following question or request comprehensively and clearly.
+
+{f"Conversation history:{chr(10)}{context}{chr(10)}" if context else ""}
+User: {message}
+
+Provide a thorough, accurate, and well-structured response. Use markdown formatting where appropriate (headings, bullet points, bold text). If this is a follow-up question, use the conversation history to understand context."""
+
+        if not self.provider.has_active_api_key():
+            static_res = self.generate(
+                intent=intent,
+                message=message,
+                schema_context=schema_context,
+                conversation_history=conversation_history,
+                document_chunks=document_chunks,
+                previous_sql=previous_sql
+            )
+            ans = static_res.get("answer", "")
+            yield {"type": "token", "token": ans}
+            yield {"type": "done", "answer": ans, "intent": intent}
+            return
+
+        full_answer = ""
+        try:
+            for token in self.provider.generate_stream(prompt, system_prompt=sys_prompt, temperature=temp):
+                full_answer += token
+                yield {"type": "token", "token": token}
+            yield {"type": "done", "answer": full_answer, "intent": intent}
+        except Exception as e:
+            classified = classify_llm_error(e)
+            err_msg = f"⚠️ **AI Generation Notice**\n\n{classified['message']}\n\nPlease verify your AI credentials or model selection in Settings."
+            yield {"type": "token", "token": err_msg}
+            yield {"type": "done", "answer": err_msg, "intent": intent}
 
     @staticmethod
     def _chat_response(

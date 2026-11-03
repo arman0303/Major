@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import fs from 'fs';
-import { config } from './config/index.js';
+import { config, validateEnvironment } from './config/index.js';
 import { DatabaseManager } from './config/db.js';
 import { router } from './routes/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
@@ -46,6 +46,7 @@ app.use(errorHandler);
 
 // Start server
 const startServer = async () => {
+  validateEnvironment();
   await DatabaseManager.initialize();
 
   app.listen(config.port, () => {

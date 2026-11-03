@@ -30,6 +30,11 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
   # 3. Python AI Microservice (FastAPI + LangChain + SQLGlot)
   ai-service:
@@ -54,6 +59,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/ai/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # 4. Node.js Backend API (Express + TypeScript)
   backend:
@@ -67,8 +78,8 @@ services:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://${PG_USER:-postgres}:${PG_PASSWORD:-postgres}@postgres:5432/${PG_DATABASE:-conversational_sql}
       - AI_SERVICE_URL=http://ai-service:8000
-      - JWT_SECRET=${JWT_SECRET:-super-secret-jwt-key-change-in-production-min-32-chars}
-      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-super-secret-jwt-refresh-key-change-in-production}
+      - JWT_SECRET=${JWT_SECRET:-conversational-sql-jwt-secret-key-development-32chars}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-conversational-sql-jwt-refresh-secret-development}
       - REDIS_URL=redis://redis:6379
       - FRONTEND_URL=http://localhost:5173
     ports:
@@ -79,7 +90,13 @@ services:
       postgres:
         condition: service_healthy
       ai-service:
-        condition: service_started
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5000/api/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # 5. React Frontend (Vite + Nginx)
   frontend:
@@ -91,7 +108,8 @@ services:
     ports:
       - "5173:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   postgres_data:

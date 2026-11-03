@@ -188,3 +188,40 @@ export const updateSettings = async (req: AuthenticatedRequest, res: Response): 
 
   res.json({ message: 'Settings updated successfully' });
 };
+
+export const refreshToken = async (req: Request, res: Response): Promise<void> => {
+  const { refreshToken: token } = req.body;
+  if (!token) {
+    res.status(400).json({ error: 'Refresh token is required' });
+    return;
+  }
+
+  try {
+    const decoded = jwt.verify(token, config.jwt.refreshSecret) as { id: string };
+    const userResult = await DatabaseManager.query(
+      'SELECT id, email, full_name, role FROM users WHERE id = $1',
+      [decoded.id]
+    );
+
+    if (userResult.rows.length === 0) {
+      res.status(401).json({ error: 'User no longer exists or session revoked' });
+      return;
+    }
+
+    const user = userResult.rows[0];
+    const userPayload = { id: user.id, email: user.email, fullName: user.full_name, role: user.role };
+    const tokens = generateTokens(userPayload);
+
+    res.json({
+      message: 'Token refreshed successfully',
+      ...tokens,
+      user: userPayload,
+    });
+  } catch (err: any) {
+    res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+};
+
+export const logout = async (_req: Request, res: Response): Promise<void> => {
+  res.json({ message: 'Logged out successfully' });
+};

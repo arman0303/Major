@@ -36,6 +36,40 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
   const data = await response.json().catch(() => ({}));
 
+  if (response.status === 401 && data.code === 'TOKEN_EXPIRED') {
+    const refreshToken = localStorage.getItem('refreshToken');
+    if (refreshToken) {
+      try {
+        const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refreshToken }),
+        });
+        if (refreshRes.ok) {
+          const refreshData = await refreshRes.json();
+          if (refreshData.token) {
+            localStorage.setItem('token', refreshData.token);
+            if (refreshData.refreshToken) {
+              localStorage.setItem('refreshToken', refreshData.refreshToken);
+            }
+            // Retry original request with renewed access token
+            headers['Authorization'] = `Bearer ${refreshData.token}`;
+            const retryRes = await fetch(`${API_BASE}${endpoint}`, {
+              ...options,
+              headers,
+            });
+            const retryData = await retryRes.json().catch(() => ({}));
+            if (retryRes.ok) {
+              return retryData as T;
+            }
+          }
+        }
+      } catch {
+        // Fall through to error handling below
+      }
+    }
+  }
+
   if (!response.ok) {
     throw new ApiError(data.error || 'Request failed', data.code, data.details);
   }
@@ -81,6 +115,11 @@ export const api = {
   // ── Auth ──
   register: (body: any) => request<{ user: User; token: string; refreshToken: string; defaultProjectId: string }>('/auth/register', { method: 'POST', body: JSON.stringify(body) }),
   login: (body: any) => request<{ user: User; token: string; refreshToken: string; projects: Project[] }>('/auth/login', { method: 'POST', body: JSON.stringify(body) }),
+  refreshToken: (refreshToken: string) => request<{ message: string; token: string; refreshToken: string; user: User }>('/auth/refresh', { method: 'POST', body: JSON.stringify({ refreshToken }) }),
+  logout: () => request<{ message: string }>('/auth/logout', { method: 'POST' }).finally(() => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('refreshToken');
+  }),
   getProfile: () => request<{ user: User; settings: UserSettings }>('/auth/profile'),
   updateSettings: (body: Partial<UserSettings>) => request<{ message: string }>('/auth/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
@@ -134,6 +173,76 @@ export const api = {
   // ── AI ──
   chat: (body: { conversationId: string; projectId: string; message: string }) =>
     request<ChatResponse>('/ai/chat', { method: 'POST', body: JSON.stringify(body) }),
+  chatStream: async (
+    body: { conversationId: string; projectId: string; message: string },
+    handlers: {
+      onToken?: (token: string) => void;
+      onSql?: (data: any) => void;
+      onResult?: (data: any) => void;
+      onStatus?: (status: string) => void;
+      onComplete?: (data: any) => void;
+      onError?: (error: string) => void;
+    },
+    signal?: AbortSignal
+  ) => {
+    const token = localStorage.getItem('token');
+    const response = await fetch('/api/ai/chat/stream', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new ApiError(errData.error || `HTTP ${response.status} Stream Error`, errData.code);
+    }
+
+    if (!response.body) {
+      throw new ApiError('No response body for streaming');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const jsonStr = line.slice(6).trim();
+        if (!jsonStr) continue;
+
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.type === 'token' && handlers.onToken) {
+            handlers.onToken(parsed.token);
+          } else if (parsed.type === 'sql' && handlers.onSql) {
+            handlers.onSql(parsed);
+          } else if (parsed.type === 'result' && handlers.onResult) {
+            handlers.onResult(parsed);
+          } else if (parsed.type === 'status' && handlers.onStatus) {
+            handlers.onStatus(parsed.message);
+          } else if (parsed.type === 'synthesis' && handlers.onToken) {
+            handlers.onToken(parsed.answer);
+          } else if (parsed.type === 'complete' && handlers.onComplete) {
+            handlers.onComplete(parsed);
+          } else if (parsed.type === 'error' && handlers.onError) {
+            handlers.onError(parsed.message);
+          }
+        } catch {}
+      }
+    }
+  },
   getInsights: (body: { rows: any[]; columns: string[]; query?: string }) =>
     request<any>('/ai/insights', { method: 'POST', body: JSON.stringify(body) }),
   indexDocument: (body: { fileId?: string; projectId: string; content?: string; chunks?: any[]; metadata?: any }) =>
@@ -141,6 +250,19 @@ export const api = {
 
   // ── System ──
   getSystemStatus: () => request<{ database_mode: string; status: string }>('/system/status'),
+  checkProviderHealth: (provider?: string, apiKey?: string) => {
+    const params = new URLSearchParams();
+    if (provider) params.set('provider', provider);
+    if (apiKey) params.set('api_key', apiKey);
+    return request<{
+      status: string;
+      healthy: boolean;
+      provider: string;
+      active_model?: string;
+      message: string;
+      is_retryable?: boolean;
+    }>(`/system/provider-health?${params}`);
+  },
 
   // ── Dashboards ──
   listDashboards: (projectId: string) => request<{ dashboards: Dashboard[] }>(`/dashboards?projectId=${projectId}`),

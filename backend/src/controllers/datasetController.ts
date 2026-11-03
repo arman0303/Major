@@ -471,9 +471,16 @@ export const uploadDataset = async (req: AuthenticatedRequest, res: Response): P
 
 export const getDataset = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { id } = req.params;
-  const result = await DatabaseManager.query('SELECT * FROM datasets WHERE id = $1', [id]);
+  const userId = req.user!.id;
+
+  const result = await DatabaseManager.query(
+    `SELECT d.* FROM datasets d
+     JOIN projects p ON d.project_id = p.id
+     WHERE d.id = $1 AND (p.user_id = $2 OR p.user_id IS NULL)`,
+    [id, userId]
+  );
   if (result.rows.length === 0) {
-    res.status(404).json({ error: 'Dataset not found' });
+    res.status(404).json({ error: 'Dataset not found or access denied' });
     return;
   }
   res.json({ dataset: result.rows[0] });
@@ -481,9 +488,16 @@ export const getDataset = async (req: AuthenticatedRequest, res: Response): Prom
 
 export const deleteDataset = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   const { id } = req.params;
-  const result = await DatabaseManager.query('SELECT table_name FROM datasets WHERE id = $1', [id]);
+  const userId = req.user!.id;
+
+  const result = await DatabaseManager.query(
+    `SELECT d.id, d.table_name FROM datasets d
+     JOIN projects p ON d.project_id = p.id
+     WHERE d.id = $1 AND (p.user_id = $2 OR p.user_id IS NULL)`,
+    [id, userId]
+  );
   if (result.rows.length === 0) {
-    res.status(404).json({ error: 'Dataset not found' });
+    res.status(404).json({ error: 'Dataset not found or access denied' });
     return;
   }
 

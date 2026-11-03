@@ -2,7 +2,9 @@
 AI Service API Routes — FastAPI router with all AI endpoints.
 """
 from typing import Dict, Any, List, Optional
+import json
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from starlette.responses import StreamingResponse
 from pydantic import BaseModel
 
 from ..sql.generator import SQLGenerator
@@ -201,6 +203,69 @@ def unified_chat(req: ChatRequest):
         "intent_confidence": classification["confidence"],
         "intent_method": classification["method"],
     }
+
+
+@router.post("/chat/stream")
+def unified_chat_stream(req: ChatRequest):
+    """
+    Streaming chat endpoint that yields Server-Sent Events (SSE)
+    containing metadata, operational progress, tokens, and final answer.
+    """
+    llm = LLMProvider(provider=req.provider, api_key=req.api_key)
+    router_instance = IntentRouter(provider=llm)
+    generator = ResponseGenerator(provider=llm)
+
+    # 1. Classify intent
+    classification = router_instance.classify(
+        message=req.message,
+        has_uploaded_docs=req.has_uploaded_docs or False,
+        conversation_history=req.conversation_history,
+        schema_context=req.schema_context,
+    )
+    intent = classification["intent"]
+
+    # 2. Retrieve document chunks if needed
+    document_chunks = []
+    if intent in ("document_qa", "hybrid") and req.project_id:
+        try:
+            document_chunks = rag_retriever.retrieve(
+                query=req.message,
+                project_id=req.project_id,
+                user_id=req.user_id,
+                top_k=6,
+            )
+        except Exception:
+            pass
+
+    def event_stream():
+        # First send metadata event
+        meta_event = {
+            "type": "meta",
+            "intent": intent,
+            "document_sources": [
+                {
+                    "document_name": c.get("metadata", {}).get("source", "Document"),
+                    "page_number": c.get("metadata", {}).get("page_number", 1),
+                    "chunk_id": c.get("id"),
+                    "content_preview": c.get("content", "")[:200]
+                }
+                for c in (document_chunks or [])
+            ]
+        }
+        yield f"data: {json.dumps(meta_event)}\n\n"
+
+        # Stream tokens or events from generator
+        for event in generator.stream_generate(
+            intent=intent,
+            message=req.message,
+            schema_context=req.schema_context,
+            conversation_history=req.conversation_history or [],
+            document_chunks=document_chunks,
+            previous_sql=req.previous_sql,
+        ):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/generate-title")
